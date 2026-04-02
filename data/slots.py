@@ -1,77 +1,53 @@
 """
-GIKI Time Slots - Spring 2026
-==============================
-Derived from official timetable.
-Mon-Thu: 8 slots (50min). Friday: shorter schedule.
-Labs: 3-hour blocks (Cyber Lab has named slots 1 and 2).
+GIKI Time Slots
+Lectures: 50 min. Labs: 180 min, can fall anywhere a 3-hr block fits.
+Default end: 17:30. Extended: 19:30 (7:30pm).
 """
-
 from core.models import TimeSlot, DayOfWeek
 
-
-def build_giki_slots() -> dict[str, TimeSlot]:
-    """Build official GIKI Spring 2026 time slots."""
+def build_giki_slots(extended: bool = False) -> dict[str, TimeSlot]:
     slots = {}
+    # Mon-Thu: 8 lecture slots standard
+    lecture_starts_mth = [480,540,630,690,750,870,930,990]  # 08,09,10:30,11:30,12:30,14:30,15:30,16:30
+    # Friday: different grid
+    lecture_starts_fri = [480,540,600,660,720,870,930,990]  # 08,09,10,11,12,14:30,15:30,16:30
+    # Extended evening slots (optional)
+    extended_starts = [1050, 1110]  # 17:30, 18:30
 
-    # Mon-Thu lecture slots (50 min each)
-    lecture_times = [
-        (480, "0800"),   # 08:00-08:50
-        (540, "0900"),   # 09:00-09:50
-        (630, "1030"),   # 10:30-11:20
-        (690, "1130"),   # 11:30-12:20
-        (750, "1230"),   # 12:30-13:20
-        (870, "1430"),   # 14:30-15:20
-        (930, "1530"),   # 15:30-16:20
-        (990, "1630"),   # 16:30-17:20
-    ]
+    days_mth = [(DayOfWeek.MONDAY,"MON"),(DayOfWeek.TUESDAY,"TUE"),
+                (DayOfWeek.WEDNESDAY,"WED"),(DayOfWeek.THURSDAY,"THU")]
 
-    # Friday lecture slots (different grid)
-    friday_lecture_times = [
-        (480, "0800"),   # 08:00-08:50
-        (540, "0900"),   # 09:00-09:50
-        (600, "1000"),   # 10:00-10:50
-        (660, "1100"),   # 11:00-11:50
-        (720, "1200"),   # 12:00-12:50
-        (870, "1430"),   # 14:30-15:20
-        (930, "1530"),   # 15:30-16:20
-        (990, "1630"),   # 16:30-17:20
-    ]
+    for day, abbr in days_mth:
+        starts = lecture_starts_mth + (extended_starts if extended else [])
+        for sm in starts:
+            h,m = divmod(sm,60)
+            sid = f"L-{abbr}-{h:02d}{m:02d}"
+            slots[sid] = TimeSlot(sid, day, sm, 50)
+        # Lab slots: every 3-hr block that fits in the day (flexible)
+        # 08:00-11:00, 09:00-12:00, 10:30-13:30, 11:30-14:30, 14:30-17:30
+        lab_starts = [480,540,630,690,870]
+        if extended:
+            lab_starts += [930,990,1050]
+        for i,ls in enumerate(lab_starts):
+            sid = f"LAB-{abbr}-{i+1}"
+            slots[sid] = TimeSlot(sid, day, ls, 180)
 
-    days_mf = [
-        (DayOfWeek.MONDAY,    "MON"),
-        (DayOfWeek.TUESDAY,   "TUE"),
-        (DayOfWeek.WEDNESDAY, "WED"),
-        (DayOfWeek.THURSDAY,  "THU"),
-    ]
-
-    # Lecture slots Mon-Thu
-    for day, abbr in days_mf:
-        for start_min, time_str in lecture_times:
-            slot_id = f"L-{abbr}-{time_str}"
-            slots[slot_id] = TimeSlot(slot_id, day, start_min, 50)
-
-    # Friday lecture slots
-    for start_min, time_str in friday_lecture_times:
-        slot_id = f"L-FRI-{time_str}"
-        slots[slot_id] = TimeSlot(slot_id, DayOfWeek.FRIDAY, start_min, 50)
-
-    # Lab slots (3 hour = 180 min) - two per day Mon-Thu
-    lab_starts = [(480, "0800"), (660, "1100")]
-    for day, abbr in days_mf:
-        for i, (start_min, time_str) in enumerate(lab_starts, 1):
-            slot_id = f"LAB-{abbr}-{i}"
-            slots[slot_id] = TimeSlot(slot_id, day, start_min, 180)
-
-    # Cyber Lab named slots (Thursday - matches existing timetable)
-    slots["CYBER-THU-SLOT1"] = TimeSlot("CYBER-THU-SLOT1", DayOfWeek.THURSDAY, 870, 180)
-    slots["CYBER-THU-SLOT2"] = TimeSlot("CYBER-THU-SLOT2", DayOfWeek.THURSDAY, 930, 50)  # second slot
+    # Friday
+    fri_starts = lecture_starts_fri + (extended_starts if extended else [])
+    for sm in fri_starts:
+        h,m = divmod(sm,60)
+        sid = f"L-FRI-{h:02d}{m:02d}"
+        slots[sid] = TimeSlot(sid, DayOfWeek.FRIDAY, sm, 50)
+    for i,ls in enumerate([480,540,600,660,870]):
+        slots[f"LAB-FRI-{i+1}"] = TimeSlot(f"LAB-FRI-{i+1}", DayOfWeek.FRIDAY, ls, 180)
 
     return slots
 
-
-def get_slot_display(slot_id: str, slots: dict) -> str:
-    """Human-readable slot string."""
-    s = slots.get(slot_id)
-    if not s:
-        return slot_id
-    return f"{s.day.value[:3]} {s.start_str}-{s.end_str}"
+def get_all_lecture_slots_ordered(slots: dict) -> list:
+    """Return lecture slots in day+time order for grid display."""
+    from core.models import DayOfWeek
+    day_order = {d:i for i,d in enumerate(DayOfWeek)}
+    return sorted(
+        [s for s in slots.values() if s.duration==50],
+        key=lambda s:(day_order[s.day], s.start_min)
+    )
