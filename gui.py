@@ -71,10 +71,10 @@ def CB(p,var,values,w=12):
     cb=ttk.Combobox(p,textvariable=var,values=values,state="readonly",width=w,font=(FF,9))
     return cb
 
-def YEAR_TO_BATCH(label:str)->int:
+def year_to_batch(label:str)->int:
     return {"Year 1":1,"Year 2":2,"Year 3":3,"Year 4":4}.get((label or "")[:6],0)
 
-def SLOT_TYPE_LABEL(duration:int)->str:
+def slot_type_label(duration:int)->str:
     return "Lab" if duration==LAB_DURATION else "Lec"
 
 def TV(p,cols,heads,widths=None,h=15):
@@ -412,7 +412,7 @@ class TimetableGridPanel(tk.Frame):
     def _filter_sessions(self):
         fac=self.fv.get() if hasattr(self,"fv") else"ALL"
         yr=self.yv.get() if hasattr(self,"yv") else"ALL"
-        bf=YEAR_TO_BATCH(yr)
+        bf=year_to_batch(yr)
         sessions=self.state.timetable.sessions
         if fac not in ("ALL","—"):
             # Check if it's a faculty or a program/sub-dept
@@ -443,7 +443,7 @@ class TimetableGridPanel(tk.Frame):
         tk.Label(self.gf,text="Day",width=8,**hfmt).grid(row=0,column=0,sticky="nsew",padx=1,pady=1)
         for ci,(sm,dur) in enumerate(time_keys):
             h,m=divmod(sm,60); eh,em=divmod(sm+dur,60)
-            typ=SLOT_TYPE_LABEL(dur)
+            typ=slot_type_label(dur)
             tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}\n{typ}",width=16,**hfmt
                       ).grid(row=0,column=ci+1,sticky="nsew",padx=1,pady=1)
         show_t=self.show_teacher.get() if hasattr(self,"show_teacher") else True
@@ -513,7 +513,7 @@ class SectionViewPanel(tk.Frame):
     def _load_sections(self,*_):
         fac=self.fv.get()
         yr=self.yv.get() if hasattr(self,"yv") else"ALL"
-        bf=YEAR_TO_BATCH(yr)
+        bf=year_to_batch(yr)
         def matches(s):
             if fac=="ALL" or fac=="—": return True
             if fac in ("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
@@ -544,7 +544,7 @@ class SectionViewPanel(tk.Frame):
         tk.Label(self.gf,text="Day",width=8,**hfmt).grid(row=1,column=0,sticky="nsew",padx=1,pady=1)
         for ci,(sm,dur) in enumerate(time_keys):
             h,m=divmod(sm,60); eh,em=divmod(sm+dur,60)
-            typ=SLOT_TYPE_LABEL(dur)
+            typ=slot_type_label(dur)
             tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}\n{typ}",width=16,**hfmt
                       ).grid(row=1,column=ci+1,sticky="nsew",padx=1,pady=1)
         show_t=self.show_teacher.get()
@@ -707,7 +707,7 @@ class SectionsPanel(tk.Frame):
     def _refresh(self,*_):
         filt=self.fv.get() if hasattr(self,"fv") else"ALL"
         yr=self.yv.get() if hasattr(self,"yv") else"ALL"
-        bf=YEAR_TO_BATCH(yr)
+        bf=year_to_batch(yr)
         for r in self.tree.get_children(): self.tree.delete(r)
         for i,(k,s) in enumerate(sorted(self.state.sections.items())):
             if filt not in("ALL","—"):
