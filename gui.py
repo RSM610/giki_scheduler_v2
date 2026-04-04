@@ -37,6 +37,8 @@ FF="Segoe UI" if sys.platform=="win32" else("SF Pro Text" if sys.platform=="darw
 DATA=os.path.join(SCRIPT_DIR,"giki_state.json")
 BATCH_LABEL={1:"Year 1 (Intake 2025)",2:"Year 2 (Intake 2024)",
              3:"Year 3 (Intake 2023)",4:"Year 4 (Intake 2022)",0:"Year Unknown"}
+YEAR_FILTERS=["ALL","Year 1 (Intake 2025)","Year 2 (Intake 2024)",
+              "Year 3 (Intake 2023)","Year 4 (Intake 2022)"]
 FAC_BG={"FCSE":"#D6E4F0","FEE":"#D5F5E3","FME":"#FCF3CF","FChE":"#FAD7A0",
         "FMCE":"#E8DAEF","FCvE":"#D1F2EB","FBS":"#FDEBD0","SMgS":"#FDEDEC"}
 
@@ -66,6 +68,9 @@ def L(p,text,size=9,bold=False,color=None,bg=None):
 def CB(p,var,values,w=12):
     cb=ttk.Combobox(p,textvariable=var,values=values,state="readonly",width=w,font=(FF,9))
     return cb
+
+def YEAR_TO_BATCH(label:str)->int:
+    return {"Year 1":1,"Year 2":2,"Year 3":3,"Year 4":4}.get((label or "")[:6],0)
 
 def TV(p,cols,heads,widths=None,h=15):
     st=ttk.Style(); st.theme_use("clam")
@@ -379,6 +384,10 @@ class TimetableGridPanel(tk.Frame):
         self.fv=tk.StringVar(value="ALL")
         cb=CB(ctrl,self.fv,ALL_PROGRAMS,14); cb.pack(side="left",padx=6)
         cb.bind("<<ComboboxSelected>>",lambda e:self._refresh())
+        L(ctrl,"Year:",9).pack(side="left",padx=(12,4))
+        self.yv=tk.StringVar(value="ALL")
+        yc=CB(ctrl,self.yv,YEAR_FILTERS,24); yc.pack(side="left",padx=4)
+        yc.bind("<<ComboboxSelected>>",lambda e:self._refresh())
         # Teacher name toggle
         self.show_teacher=tk.BooleanVar(value=True)
         ttk.Checkbutton(ctrl,text="Show Teacher",variable=self.show_teacher,
@@ -397,41 +406,48 @@ class TimetableGridPanel(tk.Frame):
         self._refresh()
     def _filter_sessions(self):
         fac=self.fv.get() if hasattr(self,"fv") else"ALL"
+        yr=self.yv.get() if hasattr(self,"yv") else"ALL"
+        bf=YEAR_TO_BATCH(yr)
         sessions=self.state.timetable.sessions
-        if fac=="ALL" or fac=="—": return sessions
-        # Check if it's a faculty or a program/sub-dept
-        if fac in ("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
-            return [s for s in sessions if s.faculty==fac]
-        # Sub-department filter by course code prefix or section program
-        def matches(s):
-            sec=self.state.sections.get(s.section_uid)
-            if sec and hasattr(sec,'program') and sec.program==fac: return True
-            from config.departments import get_program_from_code
-            return get_program_from_code(s.course_code)==fac
-        return [s for s in sessions if matches(s)]
+        if fac not in ("ALL","—"):
+            # Check if it's a faculty or a program/sub-dept
+            if fac in ("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
+                sessions=[s for s in sessions if s.faculty==fac]
+            else:
+                # Sub-department filter by course code prefix or section program
+                def matches(s):
+                    sec=self.state.sections.get(s.section_uid)
+                    if sec and hasattr(sec,'program') and sec.program==fac: return True
+                    from config.departments import get_program_from_code
+                    return get_program_from_code(s.course_code)==fac
+                sessions=[s for s in sessions if matches(s)]
+        if bf:
+            sessions=[s for s in sessions if s.batch_year==bf]
+        return sessions
     def _refresh(self,*_):
         for w in self.gf.winfo_children(): w.destroy()
         sessions=self._filter_sessions()
         days=list(DayOfWeek)
-        sms=sorted(set(sl.start_min for sl in self.state.slots.values() if sl.duration==50))
-        if not sms: L(self.gf,"No lecture slots defined.",9).pack(pady=20); return
+        time_keys=sorted(set((sl.start_min,sl.duration) for sl in self.state.slots.values()))
+        if not time_keys: L(self.gf,"No slots defined.",9).pack(pady=20); return
         cell_map={}
         for sess in sessions:
             sl=self.state.slots.get(sess.slot_id)
-            if sl and sl.duration==50: cell_map.setdefault((sl.day,sl.start_min),[]).append(sess)
+            if sl: cell_map.setdefault((sl.day,sl.start_min,sl.duration),[]).append(sess)
         hfmt=dict(bg=C["header_bg"],fg=C["white"],font=(FF,8,"bold"),relief="flat",padx=2,pady=5)
         tk.Label(self.gf,text="Day",width=8,**hfmt).grid(row=0,column=0,sticky="nsew",padx=1,pady=1)
-        for ci,sm in enumerate(sms):
-            h,m=divmod(sm,60); eh,em=divmod(sm+50,60)
-            tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}",width=16,**hfmt
+        for ci,(sm,dur) in enumerate(time_keys):
+            h,m=divmod(sm,60); eh,em=divmod(sm+dur,60)
+            typ="Lab" if dur==180 else "Lec"
+            tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}\n{typ}",width=16,**hfmt
                       ).grid(row=0,column=ci+1,sticky="nsew",padx=1,pady=1)
         show_t=self.show_teacher.get() if hasattr(self,"show_teacher") else True
         for ri,day in enumerate(days):
             tk.Label(self.gf,text=day.value[:3],bg=C["accent"],fg=C["white"],
                       font=(FF,8,"bold"),width=8,anchor="center",padx=2,pady=4
                       ).grid(row=ri+1,column=0,sticky="nsew",padx=1,pady=1)
-            for ci,sm in enumerate(sms):
-                cs=cell_map.get((day,sm),[])
+            for ci,(sm,dur) in enumerate(time_keys):
+                cs=cell_map.get((day,sm,dur),[])
                 if cs:
                     lines=[]
                     for x in cs[:2]:
@@ -466,6 +482,10 @@ class SectionViewPanel(tk.Frame):
         self.fv=tk.StringVar(value="ALL")
         cb=CB(ctrl,self.fv,ALL_PROGRAMS,14); cb.pack(side="left",padx=6)
         cb.bind("<<ComboboxSelected>>",lambda e:self._load_sections())
+        L(ctrl,"Year:",9).pack(side="left",padx=(12,4))
+        self.yv=tk.StringVar(value="ALL")
+        yc=CB(ctrl,self.yv,YEAR_FILTERS,24); yc.pack(side="left",padx=4)
+        yc.bind("<<ComboboxSelected>>",lambda e:self._load_sections())
         L(ctrl,"Section:",9).pack(side="left",padx=(12,4))
         self.sv=tk.StringVar()
         self.sec_cb=CB(ctrl,self.sv,[],20); self.sec_cb.pack(side="left",padx=4)
@@ -487,12 +507,15 @@ class SectionViewPanel(tk.Frame):
         self._load_sections()
     def _load_sections(self,*_):
         fac=self.fv.get()
+        yr=self.yv.get() if hasattr(self,"yv") else"ALL"
+        bf=YEAR_TO_BATCH(yr)
         def matches(s):
             if fac=="ALL" or fac=="—": return True
             if fac in ("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
                 return s.faculty==fac
             return get_program_from_code(s.course_code)==fac
-        uids=[uid for uid,s in sorted(self.state.sections.items()) if matches(s)]
+        uids=[uid for uid,s in sorted(self.state.sections.items())
+              if matches(s) and (not bf or s.batch_year==bf)]
         self.sec_cb["values"]=uids
         if uids and self.sv.get() not in uids: self.sv.set(uids[0]); self._show_section()
     def _show_section(self,*_):
@@ -502,21 +525,22 @@ class SectionViewPanel(tk.Frame):
         sec=self.state.sections.get(uid)
         sess_list=self.state.timetable.get_sessions_by_section(uid)
         days=list(DayOfWeek)
-        sms=sorted(set(sl.start_min for sl in self.state.slots.values() if sl.duration==50))
+        time_keys=sorted(set((sl.start_min,sl.duration) for sl in self.state.slots.values()))
         cell_map={}
         for sess in sess_list:
             sl=self.state.slots.get(sess.slot_id)
-            if sl: cell_map[(sl.day,sl.start_min)]=sess
+            if sl: cell_map[(sl.day,sl.start_min,sl.duration)]=sess
         # Header info
         batch_label=BATCH_LABEL.get(sec.batch_year if sec else 0,"")
         info=f"Section: {uid}   Batch: {batch_label}   Faculty: {sec.faculty if sec else ''}"
         L(self.gf,info,9,bold=True,color=C["accent"],bg=C["white"]).grid(
-            row=0,column=0,columnspan=len(sms)+1,sticky="w",padx=8,pady=6)
+            row=0,column=0,columnspan=len(time_keys)+1,sticky="w",padx=8,pady=6)
         hfmt=dict(bg=C["header_bg"],fg=C["white"],font=(FF,8,"bold"),relief="flat",padx=2,pady=5)
         tk.Label(self.gf,text="Day",width=8,**hfmt).grid(row=1,column=0,sticky="nsew",padx=1,pady=1)
-        for ci,sm in enumerate(sms):
-            h,m=divmod(sm,60); eh,em=divmod(sm+50,60)
-            tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}",width=16,**hfmt
+        for ci,(sm,dur) in enumerate(time_keys):
+            h,m=divmod(sm,60); eh,em=divmod(sm+dur,60)
+            typ="Lab" if dur==180 else "Lec"
+            tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}\n{typ}",width=16,**hfmt
                       ).grid(row=1,column=ci+1,sticky="nsew",padx=1,pady=1)
         show_t=self.show_teacher.get()
         fac=sec.faculty if sec else "FCSE"
@@ -525,8 +549,8 @@ class SectionViewPanel(tk.Frame):
             tk.Label(self.gf,text=day.value[:3],bg=C["accent"],fg=C["white"],
                       font=(FF,8,"bold"),width=8,padx=2,pady=4
                       ).grid(row=ri+2,column=0,sticky="nsew",padx=1,pady=1)
-            for ci,sm in enumerate(sms):
-                sess=cell_map.get((day,sm))
+            for ci,(sm,dur) in enumerate(time_keys):
+                sess=cell_map.get((day,sm,dur))
                 if sess:
                     sl=self.state.slots.get(sess.slot_id)
                     text=f"{sess.course_code}\n{sess.room_id}"
@@ -667,8 +691,7 @@ class SectionsPanel(tk.Frame):
         cb.bind("<<ComboboxSelected>>",lambda e:self._refresh())
         L(ff,"Year:",9).pack(side="left",padx=(12,4))
         self.yv=tk.StringVar(value="ALL")
-        yc=CB(ff,self.yv,["ALL","Year 1 (Intake 2025)","Year 2 (Intake 2024)",
-                            "Year 3 (Intake 2023)","Year 4 (Intake 2022)"],24)
+        yc=CB(ff,self.yv,YEAR_FILTERS,24)
         yc.pack(side="left",padx=4); yc.bind("<<ComboboxSelected>>",lambda e:self._refresh())
         cols=("uid","sid","course","teacher","year","faculty","prog","students")
         heads=("Full UID","Sec ID","Course","Teacher","Batch Year","Faculty","Program","Students")
@@ -679,7 +702,7 @@ class SectionsPanel(tk.Frame):
     def _refresh(self,*_):
         filt=self.fv.get() if hasattr(self,"fv") else"ALL"
         yr=self.yv.get() if hasattr(self,"yv") else"ALL"
-        bf={"Year 1":1,"Year 2":2,"Year 3":3,"Year 4":4}.get(yr[:6],0)
+        bf=YEAR_TO_BATCH(yr)
         for r in self.tree.get_children(): self.tree.delete(r)
         for i,(k,s) in enumerate(sorted(self.state.sections.items())):
             if filt not in("ALL","—"):
