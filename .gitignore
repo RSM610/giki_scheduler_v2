@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.env
+*.json.bak
+exports/
+giki_state.json
+giki_scheduler_state.json

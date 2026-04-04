@@ -1,14 +1,22 @@
 """
-GIKI Scheduler v2 - Greedy First-Fit with Faculty-Aware Room Routing
-=====================================================================
-Key addition over v1: faculty and lab-type routing.
-CyberLab -> CyS courses first, then other FCSE.
-Composite Lab -> FMCE courses only.
-HM/MS courses -> Brabers first.
-etc.
+GIKI Scheduler v2 - Redesigned Scheduler
+=========================================
+Changes from v1:
+  * ConstraintEngine.check_all now enforces cohort isolation (Req 1 & 3):
+      - Dept cohort: (batch_year, faculty, section_id) — no two courses for
+        the same department/semester section can share a timeslot.
+      - Program cohort: (batch_year, for_program, section_id) — finer-grained
+        check for named programs (CY, DS, etc.).
+  * GIKIScheduler uses a day-balanced slot ordering (Req 5):
+      - Tracks section-day load and teacher-day load across sessions.
+      - Prefers days with fewer already-scheduled sessions for the section
+        being placed, avoiding piling all sessions on Monday/Tuesday.
+      - Distributes across the full 5-day week before repeating any day.
+  * Lab / room routing and MCV ordering retained from v1.
 """
 
 from __future__ import annotations
+from collections import defaultdict
 from core.models import (
     Timetable, ScheduledSession, Section, Course,
     Teacher, TimeSlot, SessionType, DayOfWeek
@@ -41,7 +49,14 @@ class ConstraintEngine:
         self.courses  = courses
 
     def check_all(self, section_uid, teacher_id, course_code,
-                  slot_id, room_id, session_type, exclude=None) -> ConflictReport:
+                  slot_id, room_id, session_type, exclude=None,
+                  section_obj=None) -> ConflictReport:
+        """
+        Validate all constraints for placing a session.
+
+        section_obj (Section) is optional but required for cohort isolation
+        checks (Req 1 & 3).  Pass it whenever available.
+        """
         r = ConflictReport()
         slot = self.slots.get(slot_id)
         if not slot:
@@ -85,6 +100,33 @@ class ConstraintEngine:
             ex_slot = self.slots.get(existing.slot_id)
             if ex_slot and slot.conflicts_with(ex_slot):
                 r.add(f"Teacher '{teacher_id}' time overlap at {slot} vs {ex_slot}"); return r
+
+        # 8. Dept cohort isolation (Req 1) — O(1)
+        # Prevents two courses for the same (faculty, semester, section) cohort
+        # from being placed in the same timeslot.
+        if section_obj is not None and section_obj.batch_year and section_obj.faculty:
+            section_id = section_obj.section_id
+            if self.tt.is_dept_cohort_booked_at(
+                    slot_id, section_obj.batch_year, section_obj.faculty,
+                    section_id, exclude):
+                r.add(
+                    f"Dept cohort clash: {section_obj.faculty}/Y{section_obj.batch_year}"
+                    f"/Sec{section_id} already has a course in slot '{slot_id}'"
+                ); return r
+
+        # 9. Program cohort clash (Req 3) — O(1)
+        # If the course is offered to a specific program (e.g. CY, DS), ensure
+        # no other course for that program cohort is in the same slot.
+        if section_obj is not None and getattr(section_obj, 'for_program', ''):
+            prog = section_obj.for_program
+            section_id = section_obj.section_id
+            if self.tt.is_prog_cohort_booked_at(
+                    slot_id, section_obj.batch_year, prog,
+                    section_id, exclude):
+                r.add(
+                    f"Program cohort clash: {prog}/Y{section_obj.batch_year}"
+                    f"/Sec{section_id} already has a course in slot '{slot_id}'"
+                ); return r
 
         return r
 
@@ -134,7 +176,6 @@ class ConstraintEngine:
         """Full timetable validation. O(s^2) worst case."""
         r = ConflictReport()
         sessions = self.tt.sessions
-        from collections import defaultdict
         by_slot = defaultdict(list)
         for s in sessions:
             by_slot[s.slot_id].append(s)
@@ -148,14 +189,44 @@ class ConstraintEngine:
                         r.add(f"ROOM CLASH: {a.room_id} in slot {slot_id}")
                     if a.section_uid == b.section_uid:
                         r.add(f"SECTION CLASH: {a.section_uid} in slot {slot_id}")
+                    # Dept cohort clash
+                    if (a.batch_year and a.batch_year == b.batch_year
+                            and a.faculty == b.faculty
+                            and a.section_id and a.section_id == b.section_id
+                            and a.section_uid != b.section_uid):
+                        r.add(
+                            f"COHORT CLASH: {a.faculty}/Y{a.batch_year}/Sec{a.section_id}"
+                            f" → {a.course_code} & {b.course_code} in slot {slot_id}"
+                        )
+                    # Program cohort clash
+                    if (a.for_program and a.for_program == b.for_program
+                            and a.batch_year == b.batch_year
+                            and a.section_id == b.section_id
+                            and a.section_uid != b.section_uid):
+                        r.add(
+                            f"PROG CLASH: {a.for_program}/Y{a.batch_year}/Sec{a.section_id}"
+                            f" → {a.course_code} & {b.course_code} in slot {slot_id}"
+                        )
         return r
 
 
 class GIKIScheduler:
     """
-    Greedy First-Fit scheduler with faculty-aware room routing.
+    Day-balanced greedy scheduler with faculty-aware room routing.
 
-    Room selection priority:
+    Scheduling strategy (Req 5):
+      1. Sort all sections by MCV (most weekly sessions first) so heavily
+         constrained sections get placed first.
+      2. For each section, place sessions one at a time.  Before each placement
+         sort candidate slots by:
+           (section_day_load, teacher_day_load, day_index, start_min)
+         where section_day_load is the number of sessions already placed on
+         that day for THIS section.  This naturally distributes sessions across
+         the whole week instead of piling them all on Monday/Tuesday.
+      3. After placing a session, update the day-load counters so subsequent
+         sessions avoid the same day.
+
+    Room selection priority (retained from v1):
       1. Faculty's home building rooms (from FACULTY_ROUTING)
       2. Lab type matching (CyberLab for CY courses, etc.)
       3. Capacity check
@@ -170,11 +241,68 @@ class GIKIScheduler:
         self.courses  = courses
         self.engine   = ConstraintEngine(timetable, slots, rooms, teachers, courses)
 
-        day_order = {d: i for i, d in enumerate(DayOfWeek)}
+        self._day_order = {d: i for i, d in enumerate(DayOfWeek)}
         self._sorted_slots = sorted(
             slots.values(),
-            key=lambda s: (day_order[s.day], s.start_min)
+            key=lambda s: (self._day_order[s.day], s.start_min)
         )
+
+    # ------------------------------------------------------------------
+    # Day-load helpers
+    # ------------------------------------------------------------------
+
+    def _section_day_load(self, section_uid: str) -> dict:
+        """Return {DayOfWeek: count} for sessions already in the timetable
+        for the given section."""
+        load = defaultdict(int)
+        for sess in self.tt.get_sessions_by_section(section_uid):
+            slot = self.slots.get(sess.slot_id)
+            if slot:
+                load[slot.day] += 1
+        return load
+
+    def _teacher_day_load(self, teacher_id: str) -> dict:
+        """Return {DayOfWeek: count} for teacher sessions already placed."""
+        load = defaultdict(int)
+        for sess in self.tt.get_sessions_by_teacher(teacher_id):
+            slot = self.slots.get(sess.slot_id)
+            if slot:
+                load[slot.day] += 1
+        return load
+
+    def _ordered_slots_for_section(self, section: Section,
+                                   preferred_days=None) -> list:
+        """
+        Return slots sorted to achieve even weekly distribution.
+
+        Primary sort key: current day-load for this section (prefer days
+        with fewer sessions already placed).  Ties broken by teacher load,
+        then by a canonical day order (or the preferred_days order if given),
+        then by start time.
+        """
+        sec_load = self._section_day_load(section.uid)
+        tch_load = self._teacher_day_load(section.teacher_id)
+
+        if preferred_days:
+            day_rank = {d: i for i, d in enumerate(preferred_days)}
+            # Days not in preferred_days go last
+            day_rank_fn = lambda d: day_rank.get(d, len(preferred_days))
+        else:
+            day_rank_fn = lambda d: self._day_order[d]
+
+        return sorted(
+            self._sorted_slots,
+            key=lambda s: (
+                sec_load.get(s.day, 0),   # fewer section sessions on this day
+                tch_load.get(s.day, 0),   # fewer teacher sessions on this day
+                day_rank_fn(s.day),       # canonical / preferred day order
+                s.start_min,              # earlier in the day
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Room candidates
+    # ------------------------------------------------------------------
 
     def _get_candidate_rooms(self, course_code: str, session_type: SessionType,
                               num_students: int = 30) -> list[str]:
@@ -208,11 +336,18 @@ class GIKIScheduler:
 
         return result
 
+    # ------------------------------------------------------------------
+    # Core placement
+    # ------------------------------------------------------------------
+
     def schedule_section(self, section: Section,
                           preferred_days=None) -> dict:
         """
-        Schedule all sessions for one section.
-        Credit hours = number of sessions. Any value 1-4+.
+        Schedule all sessions for one section using day-balanced ordering.
+
+        Credit hours = number of weekly sessions.  Each session is placed
+        on the day that currently has the fewest sessions for this section,
+        ensuring natural spread across the week (Req 5).
         """
         course = self.courses.get(section.course_code)
         if not course:
@@ -224,17 +359,13 @@ class GIKIScheduler:
             section.course_code, course.session_type, section.num_students
         )
 
-        # Order slots by preferred days first
-        if preferred_days:
-            day_pref = {d: i for i, d in enumerate(preferred_days)}
-            ordered = sorted(self._sorted_slots,
-                key=lambda s: (day_pref.get(s.day, 99), s.start_min))
-        else:
-            ordered = self._sorted_slots
-
         scheduled, unscheduled = [], []
 
         for idx in range(1, num_sessions + 1):
+            # Re-compute ordered slots before EACH session so the day-load
+            # reflects sessions placed in earlier iterations.
+            ordered = self._ordered_slots_for_section(section, preferred_days)
+
             placed = False
             for slot in ordered:
                 if placed: break
@@ -243,7 +374,8 @@ class GIKIScheduler:
                 for room_id in candidate_rooms:
                     report = self.engine.check_all(
                         section.uid, section.teacher_id, section.course_code,
-                        slot.slot_id, room_id, course.session_type
+                        slot.slot_id, room_id, course.session_type,
+                        section_obj=section,
                     )
                     if not report:
                         sess = ScheduledSession(
@@ -256,6 +388,8 @@ class GIKIScheduler:
                             batch_year    = section.batch_year,
                             faculty       = section.faculty,
                             session_index = idx,
+                            section_id    = section.section_id,
+                            for_program   = getattr(section, 'for_program', ''),
                         )
                         self.tt.add_session(sess)
                         scheduled.append(sess)
@@ -273,8 +407,13 @@ class GIKIScheduler:
         }
 
     def schedule_all(self, sections, preferred_days=None) -> dict:
-        """MCV-ordered greedy scheduling of all sections."""
-        # Most constrained first
+        """
+        MCV-ordered scheduling of all sections.
+
+        Sections with more weekly sessions are placed first (most constrained),
+        so they get better slot choices.  Within each section the day-balanced
+        algorithm (schedule_section) ensures spread across the week.
+        """
         sorted_secs = sorted(
             sections,
             key=lambda s: (self.courses.get(s.course_code,
@@ -316,7 +455,7 @@ class GIKIScheduler:
                     r = self.engine.check_all(
                         sec.uid, sec.teacher_id, course_code,
                         slot.slot_id, candidate_rooms[0] if candidate_rooms else "",
-                        course.session_type
+                        course.session_type, section_obj=sec,
                     )
                     if r:
                         all_clear = False
@@ -333,7 +472,9 @@ class GIKIScheduler:
                             session_type=course.session_type, slot_id=slot.slot_id,
                             room_id=room_id, teacher_id=sec.teacher_id,
                             batch_year=sec.batch_year, faculty=sec.faculty,
-                            session_index=idx
+                            session_index=idx,
+                            section_id=sec.section_id,
+                            for_program=getattr(sec, 'for_program', ''),
                         )
                         self.tt.add_session(sess)
                         scheduled.append(sess)

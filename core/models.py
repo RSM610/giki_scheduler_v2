@@ -3,6 +3,13 @@ GIKI Scheduler v2 - Core Models
 ================================
 O(1) composite hash index for conflict detection.
 Supports variable credit hours (1,2,3,4+), labs (3hr), lectures (50min).
+
+Cohort isolation:
+- A "cohort" is a group of students sharing the same curriculum stream:
+  (batch_year, faculty, section_id).  No two courses from the same cohort
+  may occupy the same timeslot.
+- When for_program is set (e.g. "CY", "DS") a finer-grained check is also
+  applied: (batch_year, for_program, section_id) → one course per slot.
 """
 
 from __future__ import annotations
@@ -128,6 +135,10 @@ class ScheduledSession:
     batch_year:    int
     faculty:       str
     session_index: int = 1
+    # section_id is the label part of section_uid (e.g. "A" from "CS201-A")
+    section_id:    str = ""
+    # for_program enables program-level clash checks (e.g. "CY", "DS")
+    for_program:   str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -140,6 +151,8 @@ class ScheduledSession:
             "batch_year":    self.batch_year,
             "faculty":       self.faculty,
             "session_index": self.session_index,
+            "section_id":    self.section_id,
+            "for_program":   self.for_program,
         }
 
 
@@ -148,6 +161,13 @@ class Timetable:
     O(1) conflict detection via composite hash indexes.
     Three composite dicts for teacher/room/section slot occupancy.
     add_session: O(1) amortized. clear_section: O(k).
+
+    Cohort isolation indexes:
+      _dept_cohort_at_slot  : (slot_id, batch_year, faculty, section_id) → session
+          Prevents two courses for the same department/semester/section cohort
+          from sharing a timeslot (Requirement 1).
+      _prog_cohort_at_slot  : (slot_id, batch_year, for_program, section_id) → session
+          Finer-grained check for named programs (CY, DS, etc.) — Requirement 3.
     """
 
     def __init__(self):
@@ -159,6 +179,16 @@ class Timetable:
         self._teacher_at_slot: dict[tuple, ScheduledSession] = {}
         self._room_at_slot:    dict[tuple, ScheduledSession] = {}
         self._section_at_slot: dict[tuple, ScheduledSession] = {}
+        # Cohort isolation — Req 1 & 3
+        self._dept_cohort_at_slot: dict[tuple, ScheduledSession] = {}
+        self._prog_cohort_at_slot: dict[tuple, ScheduledSession] = {}
+
+    def _cohort_keys(self, s: ScheduledSession):
+        """Return the (dept_key, prog_key) tuple for cohort index lookups."""
+        dept_key = (s.slot_id, s.batch_year, s.faculty, s.section_id)
+        prog_key = ((s.slot_id, s.batch_year, s.for_program, s.section_id)
+                    if s.for_program else None)
+        return dept_key, prog_key
 
     def add_session(self, s: ScheduledSession):
         self.sessions.append(s)
@@ -168,6 +198,11 @@ class Timetable:
         self._teacher_at_slot[(s.slot_id, s.teacher_id)] = s
         self._room_at_slot[(s.slot_id, s.room_id)]       = s
         self._section_at_slot[(s.slot_id, s.section_uid)] = s
+        # Cohort isolation
+        dk, pk = self._cohort_keys(s)
+        self._dept_cohort_at_slot[dk] = s
+        if pk:
+            self._prog_cohort_at_slot[pk] = s
 
     def remove_session(self, s: ScheduledSession):
         try: self.sessions.remove(s)
@@ -175,6 +210,11 @@ class Timetable:
         self._teacher_at_slot.pop((s.slot_id, s.teacher_id), None)
         self._room_at_slot.pop((s.slot_id, s.room_id), None)
         self._section_at_slot.pop((s.slot_id, s.section_uid), None)
+        # Cohort isolation
+        dk, pk = self._cohort_keys(s)
+        self._dept_cohort_at_slot.pop(dk, None)
+        if pk:
+            self._prog_cohort_at_slot.pop(pk, None)
         for bucket, key in [(self._slot_index, s.slot_id),
                              (self._teacher_index, s.teacher_id),
                              (self._section_index, s.section_uid)]:
@@ -200,6 +240,30 @@ class Timetable:
     def is_section_booked_at(self, slot_id: str, section_uid: str,
                               exclude=None) -> bool:
         existing = self._section_at_slot.get((slot_id, section_uid))
+        if existing is None: return False
+        if exclude is not None and existing is exclude: return False
+        return True
+
+    def is_dept_cohort_booked_at(self, slot_id: str, batch_year: int,
+                                  faculty: str, section_id: str,
+                                  exclude=None) -> bool:
+        """Req 1: prevent two courses for the same department/semester/section
+        from occupying the same timeslot."""
+        if not batch_year or not faculty or not section_id:
+            return False
+        existing = self._dept_cohort_at_slot.get((slot_id, batch_year, faculty, section_id))
+        if existing is None: return False
+        if exclude is not None and existing is exclude: return False
+        return True
+
+    def is_prog_cohort_booked_at(self, slot_id: str, batch_year: int,
+                                  for_program: str, section_id: str,
+                                  exclude=None) -> bool:
+        """Req 3: prevent two courses for the same program cohort (e.g. CY, DS)
+        from occupying the same timeslot."""
+        if not batch_year or not for_program or not section_id:
+            return False
+        existing = self._prog_cohort_at_slot.get((slot_id, batch_year, for_program, section_id))
         if existing is None: return False
         if exclude is not None and existing is exclude: return False
         return True

@@ -34,6 +34,21 @@ class CourseEntry:
         return f"{self.course_code}-{self.section}"
 
 
+def _is_lab_course(code: str, ch: int) -> bool:
+    """
+    Return True if this course should be treated as a lab (3-hr slot).
+    Triggers when:
+      - Course code ends with digit+L (e.g. CS250L, CY301L)
+      - Course code ends with -L (e.g. CS250-L)
+      - Course code ends with 'Lab'
+      - Credit hours == 1 (single-CH courses are lab sessions)
+    """
+    return (
+        bool(re.search(r'\d[Ll]$|-[Ll]$|Lab$', code, re.I))
+        or ch == 1
+    )
+
+
 def _clean(val) -> str:
     return "" if val is None else str(val).strip()
 
@@ -225,7 +240,7 @@ def _parse_sheet(rows: list, sheet_name: str) -> list[CourseEntry]:
             if sem_sheet:
                 batch_yr, intake = _sem_to_batch(int(sem_sheet.group(1)))
 
-        is_lab = bool(re.search(r'(?:^|[-\s])L$|Lab$|-L$', code, re.I))
+        is_lab = _is_lab_course(code, ch)
         faculty = _infer_faculty(code)
 
         # num_students from for_prog
@@ -279,8 +294,7 @@ def parse_csv(filepath: str) -> list[CourseEntry]:
                 credit_hours=ch, instructor=can_name, section=section,
                 faculty=_infer_faculty(code), semester=int(_clean(sem) or 0),
                 batch_year=batch_yr, intake_year=intake,
-                is_lab=bool(re.search(r'(?:^|[-\s])L$|Lab$|-L$',code,re.I)),
-                for_program=_clean(rl.get("for","")), raw_ch=raw_ch,
+                is_lab=_is_lab_course(code, ch),
             ))
     return entries
 
@@ -305,7 +319,7 @@ def parse_pdf(filepath: str) -> list[CourseEntry]:
             course_code=code, title=m.group(2).strip(),
             credit_hours=ch, instructor=can_name, section=m.group(4).strip(),
             faculty=_infer_faculty(code),
-            is_lab=bool(re.search(r'(?:^|[-\s])L$|Lab$|-L$',code,re.I)),
+            is_lab=_is_lab_course(code, ch),
             raw_ch=raw_ch,
         ))
     return entries

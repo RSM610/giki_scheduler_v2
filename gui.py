@@ -142,11 +142,25 @@ class AppState:
                 v.get("faculty",""),v.get("students",30),v.get("for",""))
             s.program=v.get("program",""); self.sections[k]=s
         for sd in data.get("sessions",[]):
-            self.timetable.add_session(ScheduledSession(sd["section_uid"],sd["course_code"],
+            self.timetable.add_session(ScheduledSession(
+                sd["section_uid"],sd["course_code"],
                 SessionType(sd["session_type"]),sd["slot_id"],sd["room_id"],sd["teacher_id"],
-                sd["batch_year"],sd.get("faculty",""),sd.get("session_index",1)))
-        saved_slots=data.get("enabled_slots",[])
-        self.enabled_slots=set(saved_slots) if saved_slots else set(self.slots.keys())
+                sd["batch_year"],sd.get("faculty",""),sd.get("session_index",1),
+                sd.get("section_id",""),sd.get("for_program",""),
+            ))
+        # Req 4: keep only slot IDs that exist in the current slot set.
+        # Add any NEW slots (not present in saved state) as enabled by default so
+        # the picker never shows "phantom disabled" slots the user can't toggle.
+        all_slot_ids=set(self.slots.keys())
+        saved_slots=set(data.get("enabled_slots",[]))
+        if saved_slots:
+            # Retain explicitly-enabled saved slots that still exist
+            valid_saved=saved_slots & all_slot_ids
+            # Any brand-new slot (not seen in saved state at all) → enable by default
+            new_slots=all_slot_ids - saved_slots
+            self.enabled_slots=valid_saved | new_slots
+        else:
+            self.enabled_slots=all_slot_ids
 
 def _import_entries(entries,state):
     def lt(c):
@@ -157,10 +171,12 @@ def _import_entries(entries,state):
         if c.startswith("CH"): return"chemistry"
         if c.startswith("PH"): return"physics"
         return"computer" if any(c.startswith(p) for p in("CS","AI","DS","IF")) else""
-    teacher_map={}  # name -> tid (avoid duplicates from multi-teacher entries)
     for e in entries:
         if e.course_code not in state.courses:
-            st=SessionType.LAB if e.is_lab else SessionType.LECTURE
+            # Req 2: parser already sets e.is_lab via _is_lab_course(); the
+            # ch==1 guard is a safety net for state loaded from older saves.
+            is_lab=e.is_lab or e.credit_hours==1
+            st=SessionType.LAB if is_lab else SessionType.LECTURE
             c=Course(e.course_code,e.title,e.credit_hours,st,e.faculty,[],lt(e.course_code))
             c.program=get_program_from_code(e.course_code); state.courses[e.course_code]=c
         if not e.instructor: continue
@@ -295,10 +311,20 @@ class SlotPickerPanel(tk.Frame):
     def _rebuild(self):
         for w in self.gf.winfo_children(): w.destroy()
         self._btns.clear()
+        # Remember which IDs were previously known (before extended-mode toggle)
+        prev_ids=set(self.state.slots.keys())
         slots_all=build_giki_slots(extended=self.ext_var.get())
+        new_ids=set(slots_all.keys())
+        # Req 4: when rebuilding (e.g. extended toggle), synchronise enabled_slots:
+        #   • brand-new slots (added by extending) → enable by default
+        #   • removed slots (no longer exist) → remove from enabled_slots
+        #   • existing slots → keep their current on/off state
+        added=new_ids-prev_ids; removed=prev_ids-new_ids
+        self.state.enabled_slots|=added          # new slots start enabled
+        self.state.enabled_slots-=removed        # stale slots cleaned up
+        if not self.state.enabled_slots:         # guard: at least open all
+            self.state.enabled_slots=set(new_ids)
         self.state.slots=slots_all
-        if not self.state.enabled_slots:
-            self.state.enabled_slots=set(slots_all.keys())
         days=list(DayOfWeek)
         time_keys=sorted(set((s.start_min,s.duration) for s in slots_all.values()))
         hfmt=dict(bg=C["header_bg"],fg=C["white"],font=(FF,8,"bold"),relief="flat",padx=2,pady=5)

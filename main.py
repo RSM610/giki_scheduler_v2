@@ -117,7 +117,8 @@ class AppState:
                 sd["section_uid"], sd["course_code"],
                 SessionType(sd["session_type"]), sd["slot_id"],
                 sd["room_id"], sd["teacher_id"], sd["batch_year"],
-                sd.get("faculty",""), sd.get("session_index", 1)
+                sd.get("faculty",""), sd.get("session_index", 1),
+                sd.get("section_id",""), sd.get("for_program",""),
             )
             self.timetable.add_session(sess)
 
@@ -174,7 +175,9 @@ def import_courses_from_file(state: AppState):
         # Add/update course
         if entry.course_code not in state.courses:
             lab_type = _infer_lab_type(entry.course_code)
-            session_type = SessionType.LAB if entry.is_lab else SessionType.LECTURE
+            # Req 2: treat 1-CH courses and codes ending with "L" as labs
+            is_lab = entry.is_lab or entry.credit_hours == 1
+            session_type = SessionType.LAB if is_lab else SessionType.LECTURE
             state.courses[entry.course_code] = Course(
                 entry.course_code, entry.title,
                 entry.credit_hours, session_type,
