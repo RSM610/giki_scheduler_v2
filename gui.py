@@ -39,6 +39,8 @@ BATCH_LABEL={1:"Year 1 (Intake 2025)",2:"Year 2 (Intake 2024)",
              3:"Year 3 (Intake 2023)",4:"Year 4 (Intake 2022)",0:"Year Unknown"}
 YEAR_FILTERS=["ALL","Year 1 (Intake 2025)","Year 2 (Intake 2024)",
               "Year 3 (Intake 2023)","Year 4 (Intake 2022)"]
+LECTURE_DURATION=50
+LAB_DURATION=180
 FAC_BG={"FCSE":"#D6E4F0","FEE":"#D5F5E3","FME":"#FCF3CF","FChE":"#FAD7A0",
         "FMCE":"#E8DAEF","FCvE":"#D1F2EB","FBS":"#FDEBD0","SMgS":"#FDEDEC"}
 
@@ -71,6 +73,9 @@ def CB(p,var,values,w=12):
 
 def YEAR_TO_BATCH(label:str)->int:
     return {"Year 1":1,"Year 2":2,"Year 3":3,"Year 4":4}.get((label or "")[:6],0)
+
+def SLOT_TYPE_LABEL(duration:int)->str:
+    return "Lab" if duration==LAB_DURATION else "Lec"
 
 def TV(p,cols,heads,widths=None,h=15):
     st=ttk.Style(); st.theme_use("clam")
@@ -429,7 +434,7 @@ class TimetableGridPanel(tk.Frame):
         sessions=self._filter_sessions()
         days=list(DayOfWeek)
         time_keys=sorted(set((sl.start_min,sl.duration) for sl in self.state.slots.values()))
-        if not time_keys: L(self.gf,"No slots defined.",9).pack(pady=20); return
+        if not time_keys: L(self.gf,"No slots available for display.",9).pack(pady=20); return
         cell_map={}
         for sess in sessions:
             sl=self.state.slots.get(sess.slot_id)
@@ -438,7 +443,7 @@ class TimetableGridPanel(tk.Frame):
         tk.Label(self.gf,text="Day",width=8,**hfmt).grid(row=0,column=0,sticky="nsew",padx=1,pady=1)
         for ci,(sm,dur) in enumerate(time_keys):
             h,m=divmod(sm,60); eh,em=divmod(sm+dur,60)
-            typ="Lab" if dur==180 else "Lec"
+            typ=SLOT_TYPE_LABEL(dur)
             tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}\n{typ}",width=16,**hfmt
                       ).grid(row=0,column=ci+1,sticky="nsew",padx=1,pady=1)
         show_t=self.show_teacher.get() if hasattr(self,"show_teacher") else True
@@ -539,7 +544,7 @@ class SectionViewPanel(tk.Frame):
         tk.Label(self.gf,text="Day",width=8,**hfmt).grid(row=1,column=0,sticky="nsew",padx=1,pady=1)
         for ci,(sm,dur) in enumerate(time_keys):
             h,m=divmod(sm,60); eh,em=divmod(sm+dur,60)
-            typ="Lab" if dur==180 else "Lec"
+            typ=SLOT_TYPE_LABEL(dur)
             tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}\n{typ}",width=16,**hfmt
                       ).grid(row=1,column=ci+1,sticky="nsew",padx=1,pady=1)
         show_t=self.show_teacher.get()
