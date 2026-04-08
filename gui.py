@@ -188,7 +188,7 @@ def _import_entries(entries,state):
             is_lab=e.is_lab or e.credit_hours==1
             st=SessionType.LAB if is_lab else SessionType.LECTURE
             c=Course(e.course_code,e.title,e.credit_hours,st,e.faculty,[],lt(e.course_code))
-            c.program=get_program_from_code(e.course_code); state.courses[e.course_code]=c
+            c.program=e.for_program; state.courses[e.course_code]=c
         if not e.instructor: continue
         # Handle multi-teacher entries (e.g. "Mr. A, Mr. B, Ms. C")
         instructor_names=[n.strip() for n in e.instructor.split(",") if n.strip()]
@@ -201,11 +201,17 @@ def _import_entries(entries,state):
             if primary_tid is None: primary_tid=tid
         if not primary_tid: continue
         # Handle split sections A1/A2 etc — keep them as separate sections
-        sec=Section(str(e.section),e.course_code,primary_tid,e.batch_year,
-                     e.faculty,e.num_students,e.for_program)
-        sec.program=get_program_from_code(e.course_code)
-        if sec.uid not in state.sections:
-            state.sections[sec.uid]=sec
+        sec_names = [s.strip() for s in re.split(r'[,/]', str(e.section)) if s.strip()]
+        if not sec_names:
+            sec_names = ["A"]
+        
+        for s_name in sec_names:
+            # Prevent duplicate lab problem if there are multiple entries for the same lab
+            sec = Section(s_name, e.course_code, primary_tid, e.batch_year,
+                          e.faculty, e.num_students, e.for_program)
+            sec.program = e.for_program
+            if sec.uid not in state.sections:
+                state.sections[sec.uid] = sec
 
 # ─── Dashboard ────────────────────────────────────────────────────────
 class DashboardPanel(tk.Frame):
@@ -423,8 +429,9 @@ class TimetableGridPanel(tk.Frame):
                 def matches(s):
                     sec=self.state.sections.get(s.section_uid)
                     if sec and hasattr(sec,'program') and sec.program==fac: return True
-                    from config.departments import get_program_from_code
-                    return get_program_from_code(s.course_code)==fac
+                    # fallback to course program if section program is not matching
+                    crs=self.state.courses.get(s.course_code)
+                    return crs and hasattr(crs,'program') and crs.program==fac
                 sessions=[s for s in sessions if matches(s)]
         if bf:
             sessions=[s for s in sessions if s.batch_year==bf]
@@ -456,10 +463,7 @@ class TimetableGridPanel(tk.Frame):
                 if cs:
                     lines=[]
                     for x in cs[:2]:
-                        sec=self.state.sections.get(x.section_uid)
-                        yl=f"Y{sec.batch_year}" if sec and sec.batch_year else""
-                        sid=x.section_uid.split("-")[-1]
-                        line=f"{x.course_code}\n{sid}{yl}\n{x.room_id}"
+                        line=f"{x.course_code}\n{x.room_id}"
                         if show_t: line+=f"\n{x.teacher_id[:12]}"
                         lines.append(line)
                     if len(cs)>2: lines.append(f"+{len(cs)-2}")
@@ -518,7 +522,8 @@ class SectionViewPanel(tk.Frame):
             if fac=="ALL" or fac=="—": return True
             if fac in ("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
                 return s.faculty==fac
-            return get_program_from_code(s.course_code)==fac
+            crs=self.state.courses.get(s.course_code)
+            return (s.program==fac) or (crs and hasattr(crs,'program') and crs.program==fac)
         uids=[uid for uid,s in sorted(self.state.sections.items())
               if matches(s) and (not bf or s.batch_year==bf)]
         self.sec_cb["values"]=uids
@@ -714,7 +719,8 @@ class SectionsPanel(tk.Frame):
                 if filt in("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
                     if s.faculty!=filt: continue
                 else:
-                    if get_program_from_code(s.course_code)!=filt: continue
+                    crs=self.state.courses.get(s.course_code)
+                    if s.program!=filt and (not crs or getattr(crs,'program','')!=filt): continue
             if bf and s.batch_year!=bf: continue
             tag="even" if i%2==0 else"odd"
             bl=BATCH_LABEL.get(s.batch_year,f"Year {s.batch_year}")
@@ -1074,7 +1080,7 @@ class _SectionDialog(_BD):
         if self._ex: self.state.sections.pop(self._ex.uid,None)
         s=Section(sid,code,self._fields["tid"].get().strip(),batch,
                    self._fac.get(),students,self._prog_var.get())
-        s.program=get_program_from_code(code)
+        s.program=self._prog_var.get()
         self.state.sections[s.uid]=s
         self.state.save(); self.on_done(); self.destroy()
 

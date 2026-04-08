@@ -108,7 +108,7 @@ class ConstraintEngine:
             section_id = section_obj.section_id
             if self.tt.is_dept_cohort_booked_at(
                     slot_id, section_obj.batch_year, section_obj.faculty,
-                    section_id, exclude):
+                    section_id, exclude, slot_obj=slot, all_slots=self.slots):
                 r.add(
                     f"Dept cohort clash: {section_obj.faculty}/Y{section_obj.batch_year}"
                     f"/Sec{section_id} already has a course in slot '{slot_id}'"
@@ -122,7 +122,7 @@ class ConstraintEngine:
             section_id = section_obj.section_id
             if self.tt.is_prog_cohort_booked_at(
                     slot_id, section_obj.batch_year, prog,
-                    section_id, exclude):
+                    section_id, exclude, slot_obj=slot, all_slots=self.slots):
                 r.add(
                     f"Program cohort clash: {prog}/Y{section_obj.batch_year}"
                     f"/Sec{section_id} already has a course in slot '{slot_id}'"
@@ -423,6 +423,7 @@ class GIKIScheduler:
         all_results = {}
         warnings = []
         for sec in sorted_secs:
+            self.tt.clear_section(sec.uid)
             r = self.schedule_section(sec, preferred_days)
             all_results[sec.uid] = r
             warnings.extend(r["warnings"])

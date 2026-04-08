@@ -182,6 +182,10 @@ class Timetable:
         # Cohort isolation — Req 1 & 3
         self._dept_cohort_at_slot: dict[tuple, ScheduledSession] = {}
         self._prog_cohort_at_slot: dict[tuple, ScheduledSession] = {}
+        
+        # Cohort session indexes for overlap checking
+        self._dept_cohort_index: dict[tuple, list] = {}
+        self._prog_cohort_index: dict[tuple, list] = {}
 
     def _cohort_keys(self, s: ScheduledSession):
         """Return the (dept_key, prog_key) tuple for cohort index lookups."""
@@ -203,6 +207,14 @@ class Timetable:
         self._dept_cohort_at_slot[dk] = s
         if pk:
             self._prog_cohort_at_slot[pk] = s
+            
+        # Index for overlaps
+        if s.batch_year and s.faculty and s.section_id:
+            d_idx = (s.batch_year, s.faculty, s.section_id)
+            self._dept_cohort_index.setdefault(d_idx, []).append(s)
+        if s.batch_year and s.for_program and s.section_id:
+            p_idx = (s.batch_year, s.for_program, s.section_id)
+            self._prog_cohort_index.setdefault(p_idx, []).append(s)
 
     def remove_session(self, s: ScheduledSession):
         try: self.sessions.remove(s)
@@ -215,6 +227,22 @@ class Timetable:
         self._dept_cohort_at_slot.pop(dk, None)
         if pk:
             self._prog_cohort_at_slot.pop(pk, None)
+            
+        # Cohort index cleanup
+        d_idx = (s.batch_year, s.faculty, s.section_id)
+        if d_idx in self._dept_cohort_index:
+            try: self._dept_cohort_index[d_idx].remove(s)
+            except ValueError: pass
+            if not self._dept_cohort_index[d_idx]:
+                self._dept_cohort_index.pop(d_idx, None)
+        
+        if s.for_program:
+            p_idx = (s.batch_year, s.for_program, s.section_id)
+            if p_idx in self._prog_cohort_index:
+                try: self._prog_cohort_index[p_idx].remove(s)
+                except ValueError: pass
+                if not self._prog_cohort_index[p_idx]:
+                    self._prog_cohort_index.pop(p_idx, None)
         for bucket, key in [(self._slot_index, s.slot_id),
                              (self._teacher_index, s.teacher_id),
                              (self._section_index, s.section_uid)]:
@@ -246,27 +274,51 @@ class Timetable:
 
     def is_dept_cohort_booked_at(self, slot_id: str, batch_year: int,
                                   faculty: str, section_id: str,
-                                  exclude=None) -> bool:
+                                  exclude=None, slot_obj=None, all_slots=None) -> bool:
         """Req 1: prevent two courses for the same department/semester/section
-        from occupying the same timeslot."""
+        from occupying the same timeslot, including cross-duration overlaps."""
         if not batch_year or not faculty or not section_id:
             return False
+            
+        # Exact slot match
         existing = self._dept_cohort_at_slot.get((slot_id, batch_year, faculty, section_id))
-        if existing is None: return False
-        if exclude is not None and existing is exclude: return False
-        return True
+        if existing is not None and existing is not exclude:
+            return True
+            
+        # Cross-duration overlap check (e.g., lab overlaps with lecture)
+        if slot_obj and all_slots:
+            d_idx = (batch_year, faculty, section_id)
+            for sess in self._dept_cohort_index.get(d_idx, []):
+                if sess is exclude: continue
+                if sess.slot_id == slot_id: continue
+                ex_slot = all_slots.get(sess.slot_id)
+                if ex_slot and slot_obj.conflicts_with(ex_slot):
+                    return True
+                    
+        return False
 
     def is_prog_cohort_booked_at(self, slot_id: str, batch_year: int,
                                   for_program: str, section_id: str,
-                                  exclude=None) -> bool:
+                                  exclude=None, slot_obj=None, all_slots=None) -> bool:
         """Req 3: prevent two courses for the same program cohort (e.g. CY, DS)
-        from occupying the same timeslot."""
+        from occupying the same timeslot, including cross-duration overlaps."""
         if not batch_year or not for_program or not section_id:
             return False
+            
         existing = self._prog_cohort_at_slot.get((slot_id, batch_year, for_program, section_id))
-        if existing is None: return False
-        if exclude is not None and existing is exclude: return False
-        return True
+        if existing is not None and existing is not exclude:
+            return True
+            
+        if slot_obj and all_slots:
+            p_idx = (batch_year, for_program, section_id)
+            for sess in self._prog_cohort_index.get(p_idx, []):
+                if sess is exclude: continue
+                if sess.slot_id == slot_id: continue
+                ex_slot = all_slots.get(sess.slot_id)
+                if ex_slot and slot_obj.conflicts_with(ex_slot):
+                    return True
+                    
+        return False
 
     def get_sessions_by_slot(self, slot_id: str) -> list:
         return self._slot_index.get(slot_id, [])

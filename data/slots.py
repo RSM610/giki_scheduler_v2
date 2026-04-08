@@ -23,11 +23,15 @@ def build_giki_slots(extended: bool = False) -> dict[str, TimeSlot]:
             h,m = divmod(sm,60)
             sid = f"L-{abbr}-{h:02d}{m:02d}"
             slots[sid] = TimeSlot(sid, day, sm, 50)
-        # Lab slots: every 3-hr block that fits in the day (flexible)
-        # 08:00-11:00, 09:00-12:00, 10:30-13:30, 11:30-14:30, 14:30-17:30
-        lab_starts = [480,540,630,690,870]
-        if extended:
-            lab_starts += [930,990,1050]
+        # Lab slots: minimum 10 mins after the end of each valid lecture (s + 60)
+        # Avoid starting at the exact same minute as ANY lecture slot
+        lab_starts = []
+        for s in (lecture_starts_mth + (extended_starts if extended else [])):
+            ls = s + 60
+            while ls in starts:
+                ls += 10
+            lab_starts.append(ls)
+            
         for i,ls in enumerate(lab_starts):
             sid = f"LAB-{abbr}-{i+1}"
             slots[sid] = TimeSlot(sid, day, ls, 180)
@@ -38,7 +42,15 @@ def build_giki_slots(extended: bool = False) -> dict[str, TimeSlot]:
         h,m = divmod(sm,60)
         sid = f"L-FRI-{h:02d}{m:02d}"
         slots[sid] = TimeSlot(sid, DayOfWeek.FRIDAY, sm, 50)
-    for i,ls in enumerate([480,540,600,660,870]):
+        
+    fri_lab_starts = []
+    for s in (lecture_starts_fri + (extended_starts if extended else [])):
+        ls = s + 60
+        while ls in fri_starts:
+            ls += 10
+        fri_lab_starts.append(ls)
+        
+    for i,ls in enumerate(fri_lab_starts):
         slots[f"LAB-FRI-{i+1}"] = TimeSlot(f"LAB-FRI-{i+1}", DayOfWeek.FRIDAY, ls, 180)
 
     return slots
