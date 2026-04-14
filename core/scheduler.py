@@ -270,22 +270,46 @@ class GIKIScheduler:
                 load[slot.day] += 1
         return load
 
+    def _cohort_day_load(self, batch_year: int, faculty: str,
+                          section_id: str) -> dict:
+        """Return {DayOfWeek: count} for ALL sessions already placed for the
+        same student cohort (same batch_year + faculty + section_id), across
+        every course.  Used to prevent all courses for a cohort from piling
+        onto Monday/Tuesday/Wednesday."""
+        load = defaultdict(int)
+        if not batch_year or not faculty or not section_id:
+            return load
+        key = (batch_year, faculty, section_id)
+        for sess in self.tt._dept_cohort_index.get(key, []):
+            slot = self.slots.get(sess.slot_id)
+            if slot:
+                load[slot.day] += 1
+        return load
+
     def _ordered_slots_for_section(self, section: Section,
                                    preferred_days=None) -> list:
         """
         Return slots sorted to achieve even weekly distribution.
 
-        Primary sort key: current day-load for this section (prefer days
-        with fewer sessions already placed).  Ties broken by teacher load,
-        then by a canonical day order (or the preferred_days order if given),
-        then by start time.
+        Sort priority:
+          1. Cohort day-load  — prefer days where the student cohort
+             (batch_year + faculty + section_id) has fewer sessions overall.
+             This prevents all courses for the same cohort from stacking on
+             Mon/Tue/Wed while Thu/Fri stay empty.
+          2. Section day-load — prefer days where THIS specific section_uid
+             has fewer sessions (fine-grained balance within the course).
+          3. Teacher day-load — reduce teacher back-to-back marathon days.
+          4. Canonical day order (or preferred_days if provided).
+          5. Earliest start time within the day.
         """
-        sec_load = self._section_day_load(section.uid)
-        tch_load = self._teacher_day_load(section.teacher_id)
+        sec_load    = self._section_day_load(section.uid)
+        tch_load    = self._teacher_day_load(section.teacher_id)
+        cohort_load = self._cohort_day_load(
+            section.batch_year, section.faculty, section.section_id
+        )
 
         if preferred_days:
             day_rank = {d: i for i, d in enumerate(preferred_days)}
-            # Days not in preferred_days go last
             day_rank_fn = lambda d: day_rank.get(d, len(preferred_days))
         else:
             day_rank_fn = lambda d: self._day_order[d]
@@ -293,10 +317,11 @@ class GIKIScheduler:
         return sorted(
             self._sorted_slots,
             key=lambda s: (
-                sec_load.get(s.day, 0),   # fewer section sessions on this day
-                tch_load.get(s.day, 0),   # fewer teacher sessions on this day
-                day_rank_fn(s.day),       # canonical / preferred day order
-                s.start_min,              # earlier in the day
+                cohort_load.get(s.day, 0),  # cohort-wide spread (primary)
+                sec_load.get(s.day, 0),     # section-specific spread
+                tch_load.get(s.day, 0),     # teacher load balance
+                day_rank_fn(s.day),         # canonical / preferred day order
+                s.start_min,                # earlier in the day
             )
         )
 

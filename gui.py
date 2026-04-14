@@ -152,6 +152,9 @@ class AppState:
                 v.get("faculty",""),v.get("students",30),v.get("for",""))
             s.program=v.get("program",""); self.sections[k]=s
         for sd in data.get("sessions",[]):
+            # Skip sessions whose slot_id no longer exists (e.g. after slot redesign)
+            if sd["slot_id"] not in self.slots:
+                continue
             self.timetable.add_session(ScheduledSession(
                 sd["section_uid"],sd["course_code"],
                 SessionType(sd["session_type"]),sd["slot_id"],sd["room_id"],sd["teacher_id"],
@@ -399,6 +402,12 @@ class TimetableGridPanel(tk.Frame):
         self.yv=tk.StringVar(value="ALL")
         yc=CB(ctrl,self.yv,YEAR_FILTERS,24); yc.pack(side="left",padx=4)
         yc.bind("<<ComboboxSelected>>",lambda e:self._refresh())
+        # Section letter filter — shows all courses for one student group
+        L(ctrl,"Section:",9).pack(side="left",padx=(12,4))
+        self.section_lv=tk.StringVar(value="ALL")
+        _sec_opts=["ALL"]+[chr(ord("A")+i) for i in range(11)]  # ALL, A…K
+        slc=CB(ctrl,self.section_lv,_sec_opts,6); slc.pack(side="left",padx=4)
+        slc.bind("<<ComboboxSelected>>",lambda e:self._refresh())
         # Teacher name toggle
         self.show_teacher=tk.BooleanVar(value=True)
         ttk.Checkbutton(ctrl,text="Show Teacher",variable=self.show_teacher,
@@ -418,6 +427,7 @@ class TimetableGridPanel(tk.Frame):
     def _filter_sessions(self):
         fac=self.fv.get() if hasattr(self,"fv") else"ALL"
         yr=self.yv.get() if hasattr(self,"yv") else"ALL"
+        sec_letter=self.section_lv.get() if hasattr(self,"section_lv") else"ALL"
         bf=year_to_batch(yr)
         sessions=self.state.timetable.sessions
         if fac not in ("ALL","—"):
@@ -429,12 +439,14 @@ class TimetableGridPanel(tk.Frame):
                 def matches(s):
                     sec=self.state.sections.get(s.section_uid)
                     if sec and hasattr(sec,'program') and sec.program==fac: return True
-                    # fallback to course program if section program is not matching
                     crs=self.state.courses.get(s.course_code)
                     return crs and hasattr(crs,'program') and crs.program==fac
                 sessions=[s for s in sessions if matches(s)]
         if bf:
             sessions=[s for s in sessions if s.batch_year==bf]
+        # Section letter filter: show all courses for one student cohort group
+        if sec_letter!="ALL":
+            sessions=[s for s in sessions if s.section_id==sec_letter]
         return sessions
     def _refresh(self,*_):
         for w in self.gf.winfo_children(): w.destroy()
@@ -533,16 +545,29 @@ class SectionViewPanel(tk.Frame):
         uid=self.sv.get()
         if not uid: return
         sec=self.state.sections.get(uid)
-        sess_list=self.state.timetable.get_sessions_by_section(uid)
+        if not sec: return
+
+        # ── Show ALL courses for this student cohort (same batch_year + section_id)
+        # rather than just the single course section. This gives a complete weekly
+        # schedule for a student in that cohort.
+        cohort_by=sec.batch_year; cohort_sid=sec.section_id
+        sess_list=[s for s in self.state.timetable.sessions
+                   if s.batch_year==cohort_by and s.section_id==cohort_sid]
+
         days=list(DayOfWeek)
         time_keys=sorted(set((sl.start_min,sl.duration) for sl in self.state.slots.values()))
+        # Use a list per cell to catch any unexpected overlap (should never happen
+        # given the cohort-isolation constraint, but handle gracefully).
         cell_map={}
         for sess in sess_list:
             sl=self.state.slots.get(sess.slot_id)
-            if sl: cell_map[(sl.day,sl.start_min,sl.duration)]=sess
+            if sl: cell_map.setdefault((sl.day,sl.start_min,sl.duration),[]).append(sess)
+
         # Header info
-        batch_label=BATCH_LABEL.get(sec.batch_year if sec else 0,"")
-        info=f"Section: {uid}   Batch: {batch_label}   Faculty: {sec.faculty if sec else ''}"
+        batch_label=BATCH_LABEL.get(cohort_by,"")
+        n_courses=len(set(s.course_code for s in sess_list))
+        info=(f"Student Schedule — Section: {cohort_sid}   {batch_label}   "
+              f"Faculty: {sec.faculty}   ({n_courses} courses, {len(sess_list)} sessions)")
         L(self.gf,info,9,bold=True,color=C["accent"],bg=C["white"]).grid(
             row=0,column=0,columnspan=len(time_keys)+1,sticky="w",padx=8,pady=6)
         hfmt=dict(bg=C["header_bg"],fg=C["white"],font=(FF,8,"bold"),relief="flat",padx=2,pady=5)
@@ -553,19 +578,22 @@ class SectionViewPanel(tk.Frame):
             tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}\n{typ}",width=16,**hfmt
                       ).grid(row=1,column=ci+1,sticky="nsew",padx=1,pady=1)
         show_t=self.show_teacher.get()
-        fac=sec.faculty if sec else "FCSE"
-        bg_color=FAC_BG.get(fac,"#D6E4F0")
+        bg_color=FAC_BG.get(sec.faculty,"#D6E4F0")
         for ri,day in enumerate(days):
             tk.Label(self.gf,text=day.value[:3],bg=C["accent"],fg=C["white"],
                       font=(FF,8,"bold"),width=8,padx=2,pady=4
                       ).grid(row=ri+2,column=0,sticky="nsew",padx=1,pady=1)
             for ci,(sm,dur) in enumerate(time_keys):
-                sess=cell_map.get((day,sm,dur))
-                if sess:
-                    sl=self.state.slots.get(sess.slot_id)
+                cell_sessions=cell_map.get((day,sm,dur),[])
+                if cell_sessions:
+                    # Should be exactly 1 per cohort constraint; show first + flag extras
+                    sess=cell_sessions[0]
                     text=f"{sess.course_code}\n{sess.room_id}"
                     if show_t: text+=f"\n{sess.teacher_id[:14]}"
-                    tk.Label(self.gf,text=text,bg=bg_color,fg=C["text"],
+                    if len(cell_sessions)>1:
+                        text+=f"\n⚠ +{len(cell_sessions)-1}"
+                    cell_bg=bg_color if len(cell_sessions)==1 else "#FF6B6B"
+                    tk.Label(self.gf,text=text,bg=cell_bg,fg=C["text"],
                               font=(FF,7),width=16,justify="center",relief="ridge",padx=1,pady=3
                               ).grid(row=ri+2,column=ci+1,sticky="nsew",padx=1,pady=1)
                 else:
