@@ -93,13 +93,25 @@ class ConstraintEngine:
             if session_type == SessionType.LECTURE and room.is_lab:
                 r.add(f"Room '{room_id}' is a lab room, need lecture room"); return r
 
-        # 7. Overlapping slots (cross-duration: lab vs lecture) — O(k)
+        # 7. Teacher cross-duration overlap — O(k)
         for existing in self.tt.get_sessions_by_teacher(teacher_id):
             if existing is exclude: continue
             if existing.slot_id == slot_id: continue
             ex_slot = self.slots.get(existing.slot_id)
             if ex_slot and slot.conflicts_with(ex_slot):
                 r.add(f"Teacher '{teacher_id}' time overlap at {slot} vs {ex_slot}"); return r
+
+        # 7b. Section cross-duration overlap — O(k)
+        # Explicit check: a section cannot occupy two time-overlapping slots on
+        # the same day (e.g. a 12:00 lecture and a 12:30 lab overlap 12:30-12:50).
+        for existing in self.tt.get_sessions_by_section(section_uid):
+            if existing is exclude: continue
+            if existing.slot_id == slot_id: continue
+            ex_slot = self.slots.get(existing.slot_id)
+            if ex_slot and slot.conflicts_with(ex_slot):
+                r.add(
+                    f"Section '{section_uid}' time overlap: {slot} conflicts with {ex_slot}"
+                ); return r
 
         # 8. Dept cohort isolation (Req 1) — O(1)
         # Prevents two courses for the same (faculty, semester, section) cohort
@@ -117,15 +129,17 @@ class ConstraintEngine:
         # 9. Program cohort clash (Req 3) — O(1)
         # If the course is offered to a specific program (e.g. CY, DS), ensure
         # no other course for that program cohort is in the same slot.
+        # section_id is NOT used in this check — the for_program value already
+        # identifies the cohort, and the Excel may assign inconsistent section
+        # labels to the same student group across different courses.
         if section_obj is not None and getattr(section_obj, 'for_program', ''):
             prog = section_obj.for_program
-            section_id = section_obj.section_id
             if self.tt.is_prog_cohort_booked_at(
                     slot_id, section_obj.batch_year, prog,
-                    section_id, exclude, slot_obj=slot, all_slots=self.slots):
+                    exclude, slot_obj=slot, all_slots=self.slots):
                 r.add(
                     f"Program cohort clash: {prog}/Y{section_obj.batch_year}"
-                    f"/Sec{section_id} already has a course in slot '{slot_id}'"
+                    f" already has a course in slot '{slot_id}'"
                 ); return r
 
         return r
@@ -198,13 +212,13 @@ class ConstraintEngine:
                             f"COHORT CLASH: {a.faculty}/Y{a.batch_year}/Sec{a.section_id}"
                             f" → {a.course_code} & {b.course_code} in slot {slot_id}"
                         )
-                    # Program cohort clash
+                    # Program cohort clash — section_id excluded so inconsistent
+                    # Excel section labels for the same cohort are still caught.
                     if (a.for_program and a.for_program == b.for_program
                             and a.batch_year == b.batch_year
-                            and a.section_id == b.section_id
                             and a.section_uid != b.section_uid):
                         r.add(
-                            f"PROG CLASH: {a.for_program}/Y{a.batch_year}/Sec{a.section_id}"
+                            f"PROG CLASH: {a.for_program}/Y{a.batch_year}"
                             f" → {a.course_code} & {b.course_code} in slot {slot_id}"
                         )
         return r

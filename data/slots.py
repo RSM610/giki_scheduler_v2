@@ -2,62 +2,53 @@
 GIKI Time Slots
 Lectures: 50 min. Labs: 180 min (3-hour blocks at standard period starts).
 
-Lab slots are placed at the SAME start times as lectures (8:00, 12:30, 14:30)
-so the timetable grid stays clean — lecture and lab share column headers.
-The constraint engine prevents a cohort from having a lecture AND lab at the
-same or overlapping time.
+All five days share identical lecture start times so the timetable grid
+has no overlapping time columns.
 
-Default end: 17:30. Extended: 19:30 (7:30pm).
+Lab slots start at 09:00.  Lab 09:00-12:00 ends exactly at 12:00
+so it does not overlap the 12:00 lecture slot (strict-inequality overlap test).
+
+Last slot: 16:30-17:20 (no slots after 17:30).
 """
 from core.models import TimeSlot, DayOfWeek
 
-# Lab block start times (minutes from midnight) — align with lecture starts so
-# the grid header stays tidy.  These produce three non-overlapping lab columns:
-#   08:00-11:00 | 12:30-15:30 | 14:30-17:30
+# Lab block start times (minutes from midnight).
+# 09:00-12:00 | 12:30-15:30 | 14:30-17:30
 # (the last two overlap, but different sections can use either; the constraint
 # engine prevents the same cohort from taking both on the same day.)
-_LAB_STARTS = [480, 750, 870]         # 08:00, 12:30, 14:30
-_LAB_STARTS_EXTENDED = [480, 750, 870, 1020]   # + 17:00
+_LAB_STARTS = [540, 750, 870]                   # 09:00, 12:30, 14:30
+_LAB_STARTS_EXTENDED = [540, 750, 870]          # same — no slots after 17:30
 
 def build_giki_slots(extended: bool = False) -> dict[str, TimeSlot]:
     slots: dict[str, TimeSlot] = {}
 
-    # ── Lecture starts ────────────────────────────────────────────────────
-    # Mon-Thu: 8 periods
-    lecture_starts_mth = [480, 540, 630, 690, 750, 870, 930, 990]
-    # Friday: different mid-morning grid
-    lecture_starts_fri = [480, 540, 600, 660, 720, 870, 930, 990]
-    # Optional evening extension
-    extended_starts = [1050, 1110]   # 17:30, 18:30
+    # ── Unified lecture starts (same for all 5 days) ──────────────────────────
+    # 8 periods per day with 10-minute breaks between each.
+    # No cross-day overlaps: every (start_min, duration) pair maps to exactly
+    # one column in the timetable grid regardless of day.
+    lecture_starts = [480, 540, 600, 660, 720, 870, 930, 990]
+    # 08:00  09:00  10:00  11:00  12:00  14:30  15:30  16:30
+    extended_starts = []   # no slots after 17:30
 
-    days_mth = [
+    all_days = [
         (DayOfWeek.MONDAY,    "MON"),
         (DayOfWeek.TUESDAY,   "TUE"),
         (DayOfWeek.WEDNESDAY, "WED"),
         (DayOfWeek.THURSDAY,  "THU"),
+        (DayOfWeek.FRIDAY,    "FRI"),
     ]
 
-    # ── Mon–Thu lecture slots ─────────────────────────────────────────────
-    for day, abbr in days_mth:
-        starts = lecture_starts_mth + (extended_starts if extended else [])
+    # ── Lecture slots ─────────────────────────────────────────────────────────
+    for day, abbr in all_days:
+        starts = lecture_starts + (extended_starts if extended else [])
         for sm in starts:
             h, m = divmod(sm, 60)
             sid = f"L-{abbr}-{h:02d}{m:02d}"
             slots[sid] = TimeSlot(sid, day, sm, 50)
 
-    # ── Friday lecture slots ───────────────────────────────────────────────
-    fri_starts = lecture_starts_fri + (extended_starts if extended else [])
-    for sm in fri_starts:
-        h, m = divmod(sm, 60)
-        sid = f"L-FRI-{h:02d}{m:02d}"
-        slots[sid] = TimeSlot(sid, DayOfWeek.FRIDAY, sm, 50)
-
-    # ── Lab slots: 3 per day at standard lecture-aligned start times ───────
-    # Using the same start-minute as a lecture means the grid shows adjacent
-    # "08:00 Lec" / "08:00 Lab" columns — clean and predictable.
+    # ── Lab slots: 3 per day at standard lecture-aligned start times ──────────
     lab_starts = _LAB_STARTS_EXTENDED if extended else _LAB_STARTS
 
-    all_days = days_mth + [(DayOfWeek.FRIDAY, "FRI")]
     for day, abbr in all_days:
         for i, ls in enumerate(lab_starts):
             h, m = divmod(ls, 60)

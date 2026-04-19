@@ -106,6 +106,8 @@ class Course:
 
     @property
     def weekly_sessions(self) -> int:
+        if self.session_type == SessionType.LAB:
+            return 1
         return self.credit_hours
 
 
@@ -188,9 +190,20 @@ class Timetable:
         self._prog_cohort_index: dict[tuple, list] = {}
 
     def _cohort_keys(self, s: ScheduledSession):
-        """Return the (dept_key, prog_key) tuple for cohort index lookups."""
+        """Return the (dept_key, prog_key) tuple for cohort index lookups.
+
+        dept_key includes section_id to distinguish parallel groups within the
+        same faculty/year (e.g. CY=C, CS=K, AI=B inside FCSE Year 3).
+
+        prog_key intentionally omits section_id: the for_program field already
+        identifies the student cohort (e.g. 'CY'), so any two courses for the
+        same program+year must not share a slot regardless of their section label
+        in the Excel file.  Including section_id here caused false negatives when
+        the Excel assigned different section letters to the same cohort across
+        different courses (root cause of CS375/CS378 CY Year-3 conflict).
+        """
         dept_key = (s.slot_id, s.batch_year, s.faculty, s.section_id)
-        prog_key = ((s.slot_id, s.batch_year, s.for_program, s.section_id)
+        prog_key = ((s.slot_id, s.batch_year, s.for_program)
                     if s.for_program else None)
         return dept_key, prog_key
 
@@ -212,8 +225,8 @@ class Timetable:
         if s.batch_year and s.faculty and s.section_id:
             d_idx = (s.batch_year, s.faculty, s.section_id)
             self._dept_cohort_index.setdefault(d_idx, []).append(s)
-        if s.batch_year and s.for_program and s.section_id:
-            p_idx = (s.batch_year, s.for_program, s.section_id)
+        if s.batch_year and s.for_program:
+            p_idx = (s.batch_year, s.for_program)
             self._prog_cohort_index.setdefault(p_idx, []).append(s)
 
     def remove_session(self, s: ScheduledSession):
@@ -237,7 +250,7 @@ class Timetable:
                 self._dept_cohort_index.pop(d_idx, None)
         
         if s.for_program:
-            p_idx = (s.batch_year, s.for_program, s.section_id)
+            p_idx = (s.batch_year, s.for_program)
             if p_idx in self._prog_cohort_index:
                 try: self._prog_cohort_index[p_idx].remove(s)
                 except ValueError: pass
@@ -298,26 +311,32 @@ class Timetable:
         return False
 
     def is_prog_cohort_booked_at(self, slot_id: str, batch_year: int,
-                                  for_program: str, section_id: str,
+                                  for_program: str,
                                   exclude=None, slot_obj=None, all_slots=None) -> bool:
         """Req 3: prevent two courses for the same program cohort (e.g. CY, DS)
-        from occupying the same timeslot, including cross-duration overlaps."""
-        if not batch_year or not for_program or not section_id:
+        from occupying the same timeslot, including cross-duration overlaps.
+
+        section_id is intentionally NOT part of the key — the for_program value
+        already identifies the student cohort.  Different courses for the same
+        program may carry different section labels in the Excel file; omitting
+        section_id ensures the constraint fires regardless of that inconsistency.
+        """
+        if not batch_year or not for_program:
             return False
-            
-        existing = self._prog_cohort_at_slot.get((slot_id, batch_year, for_program, section_id))
+
+        existing = self._prog_cohort_at_slot.get((slot_id, batch_year, for_program))
         if existing is not None and existing is not exclude:
             return True
-            
+
         if slot_obj and all_slots:
-            p_idx = (batch_year, for_program, section_id)
+            p_idx = (batch_year, for_program)
             for sess in self._prog_cohort_index.get(p_idx, []):
                 if sess is exclude: continue
                 if sess.slot_id == slot_id: continue
                 ex_slot = all_slots.get(sess.slot_id)
                 if ex_slot and slot_obj.conflicts_with(ex_slot):
                     return True
-                    
+
         return False
 
     def get_sessions_by_slot(self, slot_id: str) -> list:
