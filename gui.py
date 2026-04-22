@@ -427,11 +427,9 @@ class TimetableGridPanel(tk.Frame):
             else:
                 # Sub-department filter by course code prefix or section program
                 def matches(s):
+                    if s.for_program==fac: return True
                     sec=self.state.sections.get(s.section_uid)
-                    if sec and hasattr(sec,'program') and sec.program==fac: return True
-                    # fallback to course program if section program is not matching
-                    crs=self.state.courses.get(s.course_code)
-                    return crs and hasattr(crs,'program') and crs.program==fac
+                    return bool(sec and getattr(sec,'program','')==fac)
                 sessions=[s for s in sessions if matches(s)]
         if bf:
             sessions=[s for s in sessions if s.batch_year==bf]
@@ -558,8 +556,7 @@ class SectionViewPanel(tk.Frame):
             if fac=="ALL" or fac=="—": return True
             if fac in ("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
                 return s.faculty==fac
-            crs=self.state.courses.get(s.course_code)
-            return (s.program==fac) or (crs and hasattr(crs,'program') and crs.program==fac)
+            return s.program==fac
         uids=[uid for uid,s in sorted(self.state.sections.items())
               if matches(s) and (not bf or s.batch_year==bf)]
         self.sec_cb["values"]=uids
@@ -755,8 +752,7 @@ class SectionsPanel(tk.Frame):
                 if filt in("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
                     if s.faculty!=filt: continue
                 else:
-                    crs=self.state.courses.get(s.course_code)
-                    if s.program!=filt and (not crs or getattr(crs,'program','')!=filt): continue
+                    if s.program!=filt: continue
             if bf and s.batch_year!=bf: continue
             tag="even" if i%2==0 else"odd"
             bl=BATCH_LABEL.get(s.batch_year,f"Year {s.batch_year}")
