@@ -44,8 +44,8 @@ LAB_DURATION=180
 FAC_BG={"FCSE":"#D6E4F0","FEE":"#D5F5E3","FME":"#FCF3CF","FChE":"#FAD7A0",
         "FMCE":"#E8DAEF","FCvE":"#D1F2EB","FBS":"#FDEBD0","SMgS":"#FDEDEC"}
 
-ALL_PROGRAMS=["ALL","FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS",
-               "—","CS","CE","AI","CY","DS","SE","IF","EEP","EEC","MTE","CME"]
+ALL_PROGRAMS=["ALL","FCSE","FEE","FME","FMCE","FCvE","FBS","SMgS",
+               "—","CS","CE","AI","CY","DS","SE","EE","ME","MTE","CVE","ES","MGS"]
 
 def B(p,text,cmd,color=None,w=16,fs=9):
     bg=color or C["btn"]
@@ -104,6 +104,7 @@ class AppState:
         self.courses={}; self.teachers={}; self.sections={}
         self.timetable=Timetable()
         self.enabled_slots=set(self.slots.keys())  # ALL enabled by default
+        self.elective_section_uids=set()  # UIDs of sections imported as electives
     def get_scheduler(self):
         active={k:v for k,v in self.slots.items()
                 if not self.enabled_slots or k in self.enabled_slots}
@@ -113,12 +114,14 @@ class AppState:
     def reset_all(self):
         self.courses.clear(); self.teachers.clear(); self.sections.clear()
         self.timetable=Timetable(); self.enabled_slots=set(self.slots.keys())
+        self.elective_section_uids.clear()
         if os.path.exists(DATA): os.remove(DATA)
     def advance_year(self):
         """September: all batches advance by 1, intake 2022 graduates, new Year 1 = 2026."""
         for uid,sec in list(self.sections.items()):
             if sec.batch_year==4:
-                del self.sections[uid]  # graduated
+                del self.sections[uid]
+                self.elective_section_uids.discard(uid)  # graduated — remove elective tracking too
             elif sec.batch_year>0:
                 sec.batch_year+=1
         self.save()
@@ -134,7 +137,8 @@ class AppState:
                 "batch":v.batch_year,"faculty":v.faculty,"students":v.num_students,
                 "for":v.for_program,"program":getattr(v,'program','')} for k,v in self.sections.items()},
               "sessions":[s.to_dict() for s in self.timetable.sessions],
-              "enabled_slots":list(self.enabled_slots)}
+              "enabled_slots":list(self.enabled_slots),
+              "elective_uids":list(self.elective_section_uids)}
         with open(DATA,"w",encoding="utf-8") as f: json.dump(data,f,indent=2)
     def load(self):
         if not os.path.exists(DATA): return
@@ -171,24 +175,67 @@ class AppState:
             self.enabled_slots=valid_saved | new_slots
         else:
             self.enabled_slots=all_slot_ids
+        # Restore elective tracking — keep only UIDs that still exist in sections
+        saved_electives=set(data.get("elective_uids",[]))
+        self.elective_section_uids=saved_electives & set(self.sections.keys())
+
+# Allowed course-code prefixes — only courses whose code starts with one of
+# these prefixes are imported.  Longer prefixes are checked first so "MTE"
+# takes priority over any shorter match.
+_ALLOWED_CODE_PREFIXES = tuple(sorted({
+    "CS","AI","CE","CY","DS","SE",          # FCSE (IF removed)
+    "EE",                                    # FEE
+    "ES",                                    # FBS — Environmental Sciences only
+    "ME",                                    # FME
+    "MTE",                                   # FMCE — Materials only
+    "CV",                                    # FCvE (Civil Engineering)
+    "MS","HM","AF","EM","SC",               # SMgS — all Management Sciences
+}, key=len, reverse=True))  # longer prefixes first
+
+def _code_is_allowed(course_code: str) -> bool:
+    code = course_code.upper()
+    return any(code.startswith(p) for p in _ALLOWED_CODE_PREFIXES)
+
+_VALID_PROGRAMS={"CS","CE","AI","CY","DS","SE","EE","ME","MTE","CVE","ES","MGS"}
+_FACULTY_LEVEL_CODES={"FCSE","FEE","FME","FMCE","FCVE","FBS","SMGS"}
+
+def _normalize_for_program(raw:str):
+    """Return normalised program code, '' for faculty-wide/shared rows, None to drop."""
+    if not raw: return ""
+    prog=re.sub(r'=.*$','',str(raw)).strip().upper()
+    if not prog: return ""
+    if prog in _FACULTY_LEVEL_CODES: return ""  # faculty-wide → treat as shared
+    _alias={"CYS":"CY","BCS":"CS","BAI":"AI","BCE":"CE","BDS":"DS","SWE":"SE"}
+    prog=_alias.get(prog,prog)
+    if prog in _VALID_PROGRAMS: return prog
+    return None  # unrecognised value → drop the row
 
 def _import_entries(entries,state):
     def lt(c):
         c=c.upper()
         if c.startswith("CY"): return"cyber"
         if c.startswith("SE"): return"software"
-        if c.startswith("MM"): return"composite"
-        if c.startswith("CH"): return"chemistry"
-        if c.startswith("PH"): return"physics"
-        return"computer" if any(c.startswith(p) for p in("CS","AI","DS","IF")) else""
+        if c.startswith("MTE"): return"composite"
+        if c.startswith("CV"): return"composite"
+        return"computer" if any(c.startswith(p) for p in("CS","AI","DS")) else""
     for e in entries:
+        if not _code_is_allowed(e.course_code):
+            continue
+        for_prog=_normalize_for_program(e.for_program)
+        if for_prog is None:
+            continue  # unrecognised for_program (e.g. "FCSE", "All GIKI", "BME") → drop
+        is_lab=e.is_lab or e.credit_hours==1
         if e.course_code not in state.courses:
-            # Req 2: parser already sets e.is_lab via _is_lab_course(); the
-            # ch==1 guard is a safety net for state loaded from older saves.
-            is_lab=e.is_lab or e.credit_hours==1
             st=SessionType.LAB if is_lab else SessionType.LECTURE
             c=Course(e.course_code,e.title,e.credit_hours,st,e.faculty,[],lt(e.course_code))
-            c.program=e.for_program; state.courses[e.course_code]=c
+            c.program=for_prog; state.courses[e.course_code]=c
+        else:
+            # Fix stale session_type: if the Excel identifies this as a lab but
+            # the stored record says Lecture, correct it so weekly_sessions stays 1
+            # and the lab is not over-scheduled (e.g. CS112L getting 5 sessions).
+            existing=state.courses[e.course_code]
+            if is_lab and existing.session_type==SessionType.LECTURE:
+                existing.session_type=SessionType.LAB
         if not e.instructor: continue
         # Handle multi-teacher entries (e.g. "Mr. A, Mr. B, Ms. C")
         instructor_names=[n.strip() for n in e.instructor.split(",") if n.strip()]
@@ -208,10 +255,115 @@ def _import_entries(entries,state):
         for s_name in sec_names:
             # Prevent duplicate lab problem if there are multiple entries for the same lab
             sec = Section(s_name, e.course_code, primary_tid, e.batch_year,
-                          e.faculty, e.num_students, e.for_program)
-            sec.program = e.for_program
+                          e.faculty, e.num_students, for_prog)
+            sec.program = for_prog
             if sec.uid not in state.sections:
                 state.sections[sec.uid] = sec
+
+# Programs that receive exactly ONE mandatory 3-CH elective from Year 3 onwards
+_ELECTIVE_PROGRAMS={"CS","CE","AI","CY","DS","SE","ME","EE","ES","ME","MGS","MTE","CVE"}
+_MIN_ELECTIVE_BATCH=3  # semester 5+ = batch_year 3 (Year 3) and above
+
+def _clean_prog_for_elective(raw):
+    """Normalise a for_program value to a short program code (e.g. 'CY')."""
+    if not raw: return ""
+    prog=re.sub(r'=.*$','',str(raw)).strip().upper()
+    # Map full-form names that appear in some Excel sheets
+    _alias={"CYS":"CY","BCS":"CS","BAI":"AI","BCE":"CE","BDS":"DS","SWE":"SE","CME":"CME","MTE":"MTE"}
+    return _alias.get(prog,prog)
+
+def _elective_batch(e):
+    """Return batch_year for an elective entry.
+    The parser now maps all semesters (1-2=Y1, 3-4=Y2, 5-6=Y3, 7-8=Y4),
+    so e.batch_year is already correct; this function is kept as a safety net."""
+    if e.batch_year>=_MIN_ELECTIVE_BATCH:
+        return e.batch_year
+    # Fallback: re-derive from semester in case batch_year is 0
+    sem=e.semester
+    try:
+        s=int(str(sem).strip())
+        if s in(1,2): return 1
+        if s in(3,4): return 2
+        if s in(5,6): return 3
+        if s in(7,8): return 4
+    except: pass
+    return e.batch_year
+
+def _import_elective_entries(entries,state):
+    """
+    Import elective sections from a parsed course list.
+
+    Rules enforced:
+      • Only entries whose for_program is in _ELECTIVE_PROGRAMS are accepted.
+      • batch_year must be >= 3 (3rd year / semester 5 onwards).
+      • No limit on number of electives per program/year.
+      • Credit hours are taken as-is from the Excel file.
+
+    Returns (imported_count, warning_list).
+    """
+    def _lt(c):
+        c=c.upper()
+        if c.startswith("CY"): return"cyber"
+        if c.startswith("SE"): return"software"
+        if c.startswith("MM"): return"composite"
+        if c.startswith("CH"): return"chemistry"
+        if c.startswith("PH"): return"physics"
+        return"computer" if any(c.startswith(p) for p in("CS","AI","DS","IF")) else""
+
+    warnings=[]
+    imported=0
+
+    for e in entries:
+        prog=_clean_prog_for_elective(e.for_program)
+        batch=_elective_batch(e)
+
+        if prog not in _ELECTIVE_PROGRAMS:
+            warnings.append(
+                f"Skipped {e.course_code} (sec {e.section}): "
+                f"for_program='{prog}' not in elective programs {sorted(_ELECTIVE_PROGRAMS)}")
+            continue
+
+        if batch<_MIN_ELECTIVE_BATCH:
+            warnings.append(
+                f"Skipped {e.course_code}: Year {batch} is below 3rd year "
+                f"(semester 5+ / Year 3+ required for electives)")
+            continue
+
+        if not e.instructor:
+            warnings.append(f"Skipped {e.course_code}: no instructor assigned")
+            continue
+
+        is_lab=e.is_lab or e.credit_hours==1
+        st=SessionType.LAB if is_lab else SessionType.LECTURE
+
+        # Add course using actual credit hours from the file
+        if e.course_code not in state.courses:
+            c=Course(e.course_code,e.title,e.credit_hours,st,e.faculty,[],_lt(e.course_code))
+            c.program=prog; state.courses[e.course_code]=c
+
+        # Add teacher
+        _,tid=normalize_teacher_name(e.instructor)
+        if not tid:
+            warnings.append(f"Skipped {e.course_code}: could not parse teacher '{e.instructor}'")
+            continue
+        if tid not in state.teachers:
+            t=Teacher(tid,e.instructor,e.faculty); t.can_combined=False
+            state.teachers[tid]=t
+
+        # Section ID: use whatever the Excel gives; fall back to first char of program
+        sec_names=[s.strip() for s in re.split(r'[,/]',str(e.section)) if s.strip()]
+        s_name=sec_names[0] if sec_names else prog[0]
+
+        sec=Section(s_name,e.course_code,tid,batch,e.faculty,e.num_students,prog)
+        sec.program=prog
+
+        if sec.uid not in state.sections:
+            state.sections[sec.uid]=sec
+
+        state.elective_section_uids.add(sec.uid)
+        imported+=1
+
+    return imported,warnings
 
 # ─── Dashboard ────────────────────────────────────────────────────────
 class DashboardPanel(tk.Frame):
@@ -235,10 +387,11 @@ class DashboardPanel(tk.Frame):
         self.refresh_stats()
         bf=tk.Frame(self,bg=C["bg"]); bf.pack(pady=8)
         B(bf,"Import Course List",self._import,w=18).grid(row=0,column=0,padx=6,pady=4)
-        B(bf,"Schedule All",self._schedule_all,C["btn_success"],18).grid(row=0,column=1,padx=6,pady=4)
-        B(bf,"Validate",self._validate,w=14).grid(row=0,column=2,padx=6,pady=4)
-        B(bf,"Advance Year",self._advance_year,C["btn_hover"],14).grid(row=0,column=3,padx=6,pady=4)
-        B(bf,"RESET ALL",self._reset,C["btn_danger"],12).grid(row=0,column=4,padx=6,pady=4)
+        B(bf,"Import Electives",self._import_electives,"#4A235A",18).grid(row=0,column=1,padx=6,pady=4)
+        B(bf,"Schedule All",self._schedule_all,C["btn_success"],18).grid(row=0,column=2,padx=6,pady=4)
+        B(bf,"Validate",self._validate,w=14).grid(row=0,column=3,padx=6,pady=4)
+        B(bf,"Advance Year",self._advance_year,C["btn_hover"],14).grid(row=0,column=4,padx=6,pady=4)
+        B(bf,"RESET ALL",self._reset,C["btn_danger"],12).grid(row=0,column=5,padx=6,pady=4)
         L(self,"Activity Log",11,True).pack(pady=(12,4),anchor="w",padx=30)
         self.log=scrolledtext.ScrolledText(self,height=14,font=(FF,8),bg="#1A1A2E",
             fg="#A8D8EA",insertbackground="white",relief="flat",wrap="word",padx=10,pady=8)
@@ -265,6 +418,33 @@ class DashboardPanel(tk.Frame):
             self._log(f"Imported {s['total']} entries | {s['unique_codes']} courses | {s['by_faculty']}","success")
         except Exception as e:
             self._log(f"Import error: {e}","error"); messagebox.showerror("Import Error",str(e))
+    def _import_electives(self):
+        path=filedialog.askopenfilename(title="Select Electives List (same Excel format as course list)",
+            filetypes=[("Excel/CSV","*.xlsx *.xls *.csv *.ods"),("All","*.*")])
+        if not path: return
+        self._log(f"Parsing electives from {os.path.basename(path)}...")
+        try:
+            entries=parse_course_list(path)
+            imported,warns=_import_elective_entries(entries,self.state)
+            self.state.save(); self.refresh_stats()
+            self._log(f"Electives imported: {imported} section(s) added","success")
+            for w in warns[:8]: self._log(f"  {w}","warning")
+            # Build summary per program/year for the info dialog
+            prog_yr={}
+            for uid in self.state.elective_section_uids:
+                sec=self.state.sections.get(uid)
+                if sec:
+                    key=f"{_clean_prog_for_elective(sec.for_program)}/Year {sec.batch_year}"
+                    prog_yr[key]=uid
+            summary_lines=[f"  {k}: {v}" for k,v in sorted(prog_yr.items())]
+            msg=(f"Imported {imported} elective section(s).\n\n"
+                 f"Active electives ({len(prog_yr)}):\n"+"\n".join(summary_lines))
+            if warns:
+                msg+=f"\n\nWarnings ({len(warns)}):\n"+"\n".join(warns[:12])
+                if len(warns)>12: msg+=f"\n...+{len(warns)-12} more"
+            messagebox.showinfo("Electives Imported",msg)
+        except Exception as e:
+            self._log(f"Electives import error: {e}","error"); messagebox.showerror("Import Error",str(e))
     def _schedule_all(self):
         if not self.state.sections: messagebox.showwarning("No Sections","Import a course list first."); return
         self._log("Scheduling all sections...")
@@ -420,12 +600,14 @@ class TimetableGridPanel(tk.Frame):
         yr=self.yv.get() if hasattr(self,"yv") else"ALL"
         bf=year_to_batch(yr)
         sessions=self.state.timetable.sessions
+        _FACULTIES={"FCSE","FEE","FME","FMCE","FCvE","FBS","SMgS"}
         if fac not in ("ALL","—"):
-            # Check if it's a faculty or a program/sub-dept
-            if fac in ("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
+            if fac in _FACULTIES:
                 sessions=[s for s in sessions if s.faculty==fac]
             else:
-                # Sub-department filter by course code prefix or section program
+                # Program/sub-dept filter: only match explicit for_program or section.program.
+                # No code-prefix fallback — that caused CS112L sections belonging to AI/CE/CY
+                # students to appear in the CS program view.
                 def matches(s):
                     if s.for_program==fac: return True
                     sec=self.state.sections.get(s.section_uid)
@@ -458,6 +640,11 @@ class TimetableGridPanel(tk.Frame):
     def _refresh(self,*_):
         for w in self.gf.winfo_children(): w.destroy()
         sessions=self._filter_sessions()
+        fac=self.fv.get() if hasattr(self,"fv") else"ALL"
+        yr=self.yv.get() if hasattr(self,"yv") else"ALL"
+        _BROAD_VIEWS={"ALL","—","FCSE","FEE","FME","FMCE","FCvE","FBS","SMgS"}
+        is_prog_view=fac not in _BROAD_VIEWS
+        bf_active=bool(year_to_batch(yr))
         days=list(DayOfWeek)
         time_keys=sorted(set((sl.start_min,sl.duration) for sl in self.state.slots.values()))
         if not time_keys: L(self.gf,"No slots available for display.",9).pack(pady=20); return
@@ -480,7 +667,7 @@ class TimetableGridPanel(tk.Frame):
             for ci,(sm,dur) in enumerate(time_keys):
                 cs=cell_map.get((day,sm,dur),[])
                 if cs:
-                    conflict=self._detect_conflict(cs)
+                    conflict=self._detect_conflict(cs) or (is_prog_view and bf_active and len(cs)>1)
                     if conflict:
                         # Real conflict: red cell with CLASH indicator
                         codes=", ".join(dict.fromkeys(x.course_code for x in cs))
@@ -497,14 +684,25 @@ class TimetableGridPanel(tk.Frame):
                                   font=(FF,6),width=16,justify="center",relief="ridge",padx=1,pady=2
                                   ).grid(row=ri+1,column=ci+1,sticky="nsew",padx=1,pady=1)
                     else:
-                        # Valid parallel sessions (different programs, same slot)
-                        x=cs[0]; line=f"{x.course_code}\n{x.room_id}"
-                        if show_t: line+=f"\n{x.teacher_id[:12]}"
-                        if len(cs)>1: line+=f"\n+{len(cs)-1} parallel"
-                        bg=FAC_BG.get(x.faculty,"#F0F0F0")
-                        tk.Label(self.gf,text=line,bg=bg,fg=C["text"],
-                                  font=(FF,6),width=16,justify="center",relief="ridge",padx=1,pady=2
-                                  ).grid(row=ri+1,column=ci+1,sticky="nsew",padx=1,pady=1)
+                        # Multiple valid parallel sessions — stack each one
+                        inner=tk.Frame(self.gf,bg=C["border"],bd=1,relief="ridge")
+                        inner.grid(row=ri+1,column=ci+1,sticky="nsew",padx=1,pady=1)
+                        cap=min(len(cs),4)
+                        fs=5 if cap>2 else 6
+                        for j,x in enumerate(cs[:cap]):
+                            bg=FAC_BG.get(x.faculty,"#F0F0F0")
+                            line=f"{x.course_code}\n{x.room_id}"
+                            if show_t and cap<=2: line+=f"\n{x.teacher_id[:10]}"
+                            tk.Label(inner,text=line,bg=bg,fg=C["text"],
+                                      font=(FF,fs),width=16,justify="center",
+                                      relief="flat",padx=1,pady=1).pack(fill="x")
+                            if j<cap-1:
+                                tk.Frame(inner,bg=C["border"],height=1).pack(fill="x")
+                        if len(cs)>4:
+                            tk.Label(inner,text=f"...+{len(cs)-4} more",
+                                      bg="#E8E8E8",fg=C["text_light"],
+                                      font=(FF,5),width=16,justify="center",
+                                      padx=1,pady=1).pack(fill="x")
                 else:
                     tk.Label(self.gf,text="",bg="#F8F9FA",width=16,relief="flat"
                               ).grid(row=ri+1,column=ci+1,sticky="nsew",padx=1,pady=1)
@@ -552,11 +750,11 @@ class SectionViewPanel(tk.Frame):
         fac=self.fv.get()
         yr=self.yv.get() if hasattr(self,"yv") else"ALL"
         bf=year_to_batch(yr)
+        _FACULTIES={"FCSE","FEE","FME","FMCE","FCvE","FBS","SMgS"}
         def matches(s):
             if fac=="ALL" or fac=="—": return True
-            if fac in ("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
-                return s.faculty==fac
-            return s.program==fac
+            if fac in _FACULTIES: return s.faculty==fac
+            return getattr(s,'program','')==fac
         uids=[uid for uid,s in sorted(self.state.sections.items())
               if matches(s) and (not bf or s.batch_year==bf)]
         self.sec_cb["values"]=uids
@@ -749,7 +947,7 @@ class SectionsPanel(tk.Frame):
         for r in self.tree.get_children(): self.tree.delete(r)
         for i,(k,s) in enumerate(sorted(self.state.sections.items())):
             if filt not in("ALL","—"):
-                if filt in("FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"):
+                if filt in("FCSE","FEE","FME","FMCE","FCvE","FBS","SMgS"):
                     if s.faculty!=filt: continue
                 else:
                     if s.program!=filt: continue
@@ -1023,11 +1221,11 @@ class _CourseDialog(_BD):
         self._row(f,"Credit Hours:","ch",2,str(e.credit_hours) if e else"3")
         L(f,"Faculty:",9).grid(row=3,column=0,sticky="e",padx=(16,8),pady=5)
         self._fac=tk.StringVar(value=e.faculty if e else"FCSE")
-        CB(f,self._fac,["FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"],12
+        CB(f,self._fac,["FCSE","FEE","FME","FMCE","FCvE","FBS","SMgS"],12
            ).grid(row=3,column=1,sticky="w",pady=5)
         L(f,"Program/Sub-dept:",9).grid(row=4,column=0,sticky="e",padx=(16,8),pady=5)
         self._prog=tk.StringVar(value=getattr(e,'program','') if e else"")
-        CB(f,self._prog,["","CS","CE","AI","CY","DS","SE","IF","EEP","EEC","MTE","CME"],12
+        CB(f,self._prog,["","CS","CE","AI","CY","DS","SE","EE","ME","MTE","CVE","ES","MGS"],12
            ).grid(row=4,column=1,sticky="w",pady=5)
         self._row(f,"Lab Type:","lab_type",5,e.lab_type if e else"")
         L(f,"Session Type:",9).grid(row=6,column=0,sticky="e",padx=(16,8),pady=5)
@@ -1054,7 +1252,7 @@ class _TeacherDialog(_BD):
         self._row(f,"Full Name:","name",1,e.name if e else"")
         L(f,"Faculty:",9).grid(row=2,column=0,sticky="e",padx=(16,8),pady=5)
         self._fac=tk.StringVar(value=e.faculty if e else"FCSE")
-        CB(f,self._fac,["FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"],12
+        CB(f,self._fac,["FCSE","FEE","FME","FMCE","FCvE","FBS","SMgS"],12
            ).grid(row=2,column=1,sticky="w",pady=5)
         ud=", ".join(d.value for d in e.unavailable_days) if e else""
         self._row(f,"Unavailable Days (e.g. Friday):","unavail",3,ud)
@@ -1090,14 +1288,12 @@ class _SectionDialog(_BD):
            ).grid(row=3,column=1,sticky="w",pady=5)
         L(f,"Faculty:",9).grid(row=4,column=0,sticky="e",padx=(16,8),pady=5)
         self._fac=tk.StringVar(value=e.faculty if e else"FCSE")
-        CB(f,self._fac,["FCSE","FEE","FME","FChE","FMCE","FCvE","FBS","SMgS"],12
+        CB(f,self._fac,["FCSE","FEE","FME","FMCE","FCvE","FBS","SMgS"],12
            ).grid(row=4,column=1,sticky="w",pady=5)
         self._row(f,"Students:","students",5,str(e.num_students) if e else"30")
-        # Programs dropdown — max 3 selections shown as text
         L(f,"For Program(s):",9).grid(row=6,column=0,sticky="e",padx=(16,8),pady=5)
         self._prog_var=tk.StringVar(value=e.for_program if e else"")
-        CB(f,self._prog_var,["","BME","CVE","BEE","BAI","BCS","BDS","BCE","CYS","SWE",
-                               "CME","MTE","FCSE","FEE","FME","All GIKI"],16
+        CB(f,self._prog_var,["","CS","CE","AI","CY","DS","SE","EE","ME","MTE","CVE","ES","MGS"],16
            ).grid(row=6,column=1,sticky="w",pady=5)
         B(f,"Save",self._save,C["btn_success"],20).grid(row=7,column=0,columnspan=2,pady=12)
     def _save(self):

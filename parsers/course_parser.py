@@ -72,8 +72,14 @@ def _parse_ch(ch_val) -> tuple[int, str]:
 
 
 def _sem_to_batch(sem) -> tuple[int, int]:
-    """Convert semester number to (batch_year_num, intake_year)."""
-    mapping = {2: (1, 2025), 4: (2, 2024), 6: (3, 2023), 8: (4, 2022)}
+    """Convert semester number to (batch_year_num, intake_year).
+    Two semesters per academic year: 1-2=Y1, 3-4=Y2, 5-6=Y3, 7-8=Y4."""
+    mapping = {
+        1:(1,2025), 2:(1,2025),
+        3:(2,2024), 4:(2,2024),
+        5:(3,2023), 6:(3,2023),
+        7:(4,2022), 8:(4,2022),
+    }
     try:
         s = int(str(sem).strip().replace("th","").replace("nd","").replace("rd","").replace("st",""))
         return mapping.get(s, (0, 0))
