@@ -727,9 +727,9 @@ class SectionViewPanel(tk.Frame):
         self.yv=tk.StringVar(value="ALL")
         yc=CB(ctrl,self.yv,YEAR_FILTERS,24); yc.pack(side="left",padx=4)
         yc.bind("<<ComboboxSelected>>",lambda e:self._load_sections())
-        L(ctrl,"Section:",9).pack(side="left",padx=(12,4))
+        L(ctrl,"Course with Section:",9).pack(side="left",padx=(12,4))
         self.sv=tk.StringVar()
-        self.sec_cb=CB(ctrl,self.sv,[],20); self.sec_cb.pack(side="left",padx=4)
+        self.sec_cb=CB(ctrl,self.sv,[],24); self.sec_cb.pack(side="left",padx=4)
         self.sec_cb.bind("<<ComboboxSelected>>",lambda e:self._show_section())
         self.show_teacher=tk.BooleanVar(value=True)
         ttk.Checkbutton(ctrl,text="Show Teacher",variable=self.show_teacher,
@@ -755,26 +755,55 @@ class SectionViewPanel(tk.Frame):
             if fac=="ALL" or fac=="—": return True
             if fac in _FACULTIES: return s.faculty==fac
             return getattr(s,'program','')==fac
-        uids=[uid for uid,s in sorted(self.state.sections.items())
+        uids=["ALL — Show All"]+[uid for uid,s in sorted(self.state.sections.items())
               if matches(s) and (not bf or s.batch_year==bf)]
         self.sec_cb["values"]=uids
-        if uids and self.sv.get() not in uids: self.sv.set(uids[0]); self._show_section()
+        cur=self.sv.get()
+        if cur not in uids:
+            self.sv.set(uids[0] if uids else ""); self._show_section()
     def _show_section(self,*_):
         for w in self.gf.winfo_children(): w.destroy()
         uid=self.sv.get()
         if not uid: return
-        sec=self.state.sections.get(uid)
-        sess_list=self.state.timetable.get_sessions_by_section(uid)
+
+        # ── ALL mode: collect sessions for every visible section ──────
+        is_all = uid.startswith("ALL")
+        if is_all:
+            fac=self.fv.get() if hasattr(self,"fv") else"ALL"
+            yr=self.yv.get() if hasattr(self,"yv") else"ALL"
+            bf=year_to_batch(yr)
+            _FACULTIES={"FCSE","FEE","FME","FMCE","FCvE","FBS","SMgS"}
+            def _matches(s):
+                if fac in("ALL","—"): return True
+                if fac in _FACULTIES: return s.faculty==fac
+                return getattr(s,'program','')==fac
+            visible_uids=[u for u,s in self.state.sections.items()
+                          if _matches(s) and (not bf or s.batch_year==bf)]
+            sess_list=[]
+            for vu in visible_uids:
+                sess_list.extend(self.state.timetable.get_sessions_by_section(vu))
+            sec=None
+            info_text=(f"All sections"
+                       +(f" — {fac}" if fac not in("ALL","—") else"")
+                       +(f" — {yr}" if yr!="ALL" else"")
+                       +f"   ({len(visible_uids)} sections, {len(sess_list)} sessions)")
+        else:
+            sec=self.state.sections.get(uid)
+            sess_list=self.state.timetable.get_sessions_by_section(uid)
+            batch_label=BATCH_LABEL.get(sec.batch_year if sec else 0,"")
+            info_text=f"Section: {uid}   Batch: {batch_label}   Faculty: {sec.faculty if sec else ''}"
+
         days=list(DayOfWeek)
         time_keys=sorted(set((sl.start_min,sl.duration) for sl in self.state.slots.values()))
+
+        # Build cell map — support multiple sessions per cell in ALL mode
         cell_map={}
         for sess in sess_list:
             sl=self.state.slots.get(sess.slot_id)
-            if sl: cell_map[(sl.day,sl.start_min,sl.duration)]=sess
+            if sl: cell_map.setdefault((sl.day,sl.start_min,sl.duration),[]).append(sess)
+
         # Header info
-        batch_label=BATCH_LABEL.get(sec.batch_year if sec else 0,"")
-        info=f"Section: {uid}   Batch: {batch_label}   Faculty: {sec.faculty if sec else ''}"
-        L(self.gf,info,9,bold=True,color=C["accent"],bg=C["white"]).grid(
+        L(self.gf,info_text,9,bold=True,color=C["accent"],bg=C["white"]).grid(
             row=0,column=0,columnspan=len(time_keys)+1,sticky="w",padx=8,pady=6)
         hfmt=dict(bg=C["header_bg"],fg=C["white"],font=(FF,8,"bold"),relief="flat",padx=2,pady=5)
         tk.Label(self.gf,text="Day",width=8,**hfmt).grid(row=1,column=0,sticky="nsew",padx=1,pady=1)
@@ -784,28 +813,49 @@ class SectionViewPanel(tk.Frame):
             tk.Label(self.gf,text=f"{h:02d}:{m:02d}\n{eh:02d}:{em:02d}\n{typ}",width=16,**hfmt
                       ).grid(row=1,column=ci+1,sticky="nsew",padx=1,pady=1)
         show_t=self.show_teacher.get()
-        fac=sec.faculty if sec else "FCSE"
-        bg_color=FAC_BG.get(fac,"#D6E4F0")
+        default_bg=FAC_BG.get(sec.faculty if sec else "FCSE","#D6E4F0")
+
         for ri,day in enumerate(days):
             tk.Label(self.gf,text=day.value[:3],bg=C["accent"],fg=C["white"],
                       font=(FF,8,"bold"),width=8,padx=2,pady=4
                       ).grid(row=ri+2,column=0,sticky="nsew",padx=1,pady=1)
             for ci,(sm,dur) in enumerate(time_keys):
-                sess=cell_map.get((day,sm,dur))
-                if sess:
-                    sl=self.state.slots.get(sess.slot_id)
+                cell_sessions=cell_map.get((day,sm,dur),[])
+                if not cell_sessions:
+                    tk.Label(self.gf,text="",bg="#F8F9FA",width=16,relief="flat"
+                              ).grid(row=ri+2,column=ci+1,sticky="nsew",padx=1,pady=1)
+                elif len(cell_sessions)==1:
+                    sess=cell_sessions[0]
+                    bg_color=FAC_BG.get(sess.faculty,default_bg)
                     text=f"{sess.course_code}\n{sess.room_id}"
                     if show_t: text+=f"\n{sess.teacher_id[:14]}"
                     tk.Label(self.gf,text=text,bg=bg_color,fg=C["text"],
                               font=(FF,7),width=16,justify="center",relief="ridge",padx=1,pady=3
                               ).grid(row=ri+2,column=ci+1,sticky="nsew",padx=1,pady=1)
                 else:
-                    tk.Label(self.gf,text="",bg="#F8F9FA",width=16,relief="flat"
-                              ).grid(row=ri+2,column=ci+1,sticky="nsew",padx=1,pady=1)
+                    # Multiple sessions in this cell (ALL mode)
+                    inner=tk.Frame(self.gf,bg=C["border"],bd=1,relief="ridge")
+                    inner.grid(row=ri+2,column=ci+1,sticky="nsew",padx=1,pady=1)
+                    cap=min(len(cell_sessions),4); fs=5 if cap>2 else 6
+                    for j,x in enumerate(cell_sessions[:cap]):
+                        bg=FAC_BG.get(x.faculty,"#F0F0F0")
+                        line=f"{x.course_code}\n{x.room_id}"
+                        if show_t and cap<=2: line+=f"\n{x.teacher_id[:10]}"
+                        tk.Label(inner,text=line,bg=bg,fg=C["text"],
+                                  font=(FF,fs),width=16,justify="center",
+                                  relief="flat",padx=1,pady=1).pack(fill="x")
+                        if j<cap-1:
+                            tk.Frame(inner,bg=C["border"],height=1).pack(fill="x")
+                    if len(cell_sessions)>4:
+                        tk.Label(inner,text=f"...+{len(cell_sessions)-4} more",
+                                  bg="#E8E8E8",fg=C["text_light"],
+                                  font=(FF,5),width=16,justify="center",
+                                  padx=1,pady=1).pack(fill="x")
     def _print_pdf(self):
         if not PDF_OK: messagebox.showerror("Missing","pip install reportlab"); return
         uid=self.sv.get()
-        if not uid: messagebox.showwarning("No section","Select a section first."); return
+        if not uid or uid.startswith("ALL"):
+            messagebox.showwarning("No section","Select a specific section (not ALL) to print."); return
         path=filedialog.asksaveasfilename(title="Save Section PDF",
             defaultextension=".pdf",initialfile=f"Timetable_{uid}.pdf",
             filetypes=[("PDF","*.pdf")])
